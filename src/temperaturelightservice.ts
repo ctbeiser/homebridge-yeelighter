@@ -109,19 +109,30 @@ export class TemperatureLightService extends LightService implements ConcreteLig
       },
       async (value) => {
         if (value > 0) {
+          // HomeKit scenes commonly set On=true and Brightness in quick succession.
+          // If the light is currently off, the On handler queues a debounced set_power() call.
+          // That delayed set_power() can race *after* set_bright() and reset brightness to the
+          // bulb's default (often ~50%). Ensure power is applied immediately before setting
+          // brightness whenever we detect an off->on transition or a pending power command.
+          const attributes = await this.attributes();
+          const desiredMode =
+            this.specs.nightLight && value < 50 ? POWERMODE_MOON : POWERMODE_CT;
+          const powerWasPending = Boolean(this.timer);
+          const wasOff = !attributes.power;
+
+          if (powerWasPending || wasOff) {
+            await this.sendDebouncedPowerOverride(desiredMode);
+          } else if (this.specs.nightLight && this.powerMode !== desiredMode) {
+            await this.sendDebouncedPowerOverride(desiredMode);
+          }
+
           let valueToSet = value;
           if (this.specs.nightLight) {
             if (value < 50) {
-              if (this.powerMode !== POWERMODE_MOON) {
-                await this.sendDebouncedPowerOverride(POWERMODE_MOON);
-                this.debug("Moonlight", "on");
-              }
+              // Moonlight mode is handled above via desiredMode / sendDebouncedPowerOverride.
               valueToSet = value * 2 - 1;
             } else {
-              if (this.powerMode !== POWERMODE_CT) {
-                await this.sendDebouncedPowerOverride(POWERMODE_CT);
-                this.debug("Moonlight", "off");
-              }
+              // CT mode is handled above via desiredMode / sendDebouncedPowerOverride.
               valueToSet = Math.max(1, (value - 50) * 2);
             }
           }
