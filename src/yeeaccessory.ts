@@ -90,6 +90,7 @@ export class YeeAccessory {
     const cache = YeeAccessory.handledAccessories.get(device.info.id);
     if (cache) {
       cache.debug("cache hit");
+      cache.device.updateDevice(device.info);
       cache.device.reconnect();
       return cache;
     }
