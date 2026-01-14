@@ -90,6 +90,9 @@ export class YeeAccessory {
     const cache = YeeAccessory.handledAccessories.get(device.info.id);
     if (cache) {
       cache.debug("cache hit");
+      // Refresh host/port/support/etc. in case the bulb's IP changed (DHCP) or
+      // properties changed since last time.
+      cache.device.updateDevice(device.info);
       cache.device.reconnect();
       return cache;
     }
@@ -488,7 +491,7 @@ export class YeeAccessory {
   private clearOldTransactions() {
     for (const [key, item] of this.transactions.entries()) {
       // clear transactions older than 60s
-      if (item.timestamp > Date.now() + 60_000) {
+      if (item.timestamp < Date.now() - 60_000) {
         this.log(`error: timeout for request ${key}`);
         item.reject(new Error("timeout"));
         this.transactions.delete(key);
@@ -499,9 +502,10 @@ export class YeeAccessory {
   private onInterval = () => {
     if (this.connected) {
       // if flooded wait for 5 minutes
-      if (this.floodAlarm && Date.now() - this.floodAlarm > 180_000_000) {
+      if (this.floodAlarm && Date.now() - this.floodAlarm < 300_000) {
         this.log(`flooded. waiting ${(Date.now() - this.floodAlarm) / 60_000}s`);
       } else {
+        this.floodAlarm = undefined;
         // seconds since last update
         const updateSince = (Date.now() - this.updateTimestamp) / 1000;
         const updateThreshold =
@@ -511,6 +515,10 @@ export class YeeAccessory {
             `No update received within ${updateSince}s (Threshold: ${updateThreshold} (${this.platform.config.timeout}+${this.platform.config.interval}) => switching to unreachable`
           );
           this.onDeviceDisconnected();
+          // Proactively attempt to reconnect instead of staying unreachable
+          // until the next discovery cycle or restart.
+          this.device.disconnect(false);
+          this.device.reconnect();
         } else {
           this.sendHeartbeat();
         }

@@ -130,6 +130,13 @@ export class Device extends EventEmitter {
       this.emit("socketEnd");
       this.socketClosed();
     });
+
+    // Some devices/routers will close idle TCP sessions cleanly. Treat this the
+    // same as an "end" and trigger the reconnect logic.
+    this.socket?.on("close", () => {
+      this.emit("socketClose");
+      this.socketClosed();
+    });
   }
 
   socketClosed(error?: Error) {
@@ -151,7 +158,14 @@ export class Device extends EventEmitter {
         this.retryTimer = setTimeout(this.connect.bind(this), 5000);
       }
     } else {
+      // Clean close / end without an error: still retry, otherwise we can get
+      // stuck "disconnected" until Homebridge or the bulb is restarted.
       this.disconnect(false);
+      if (this.retryTimer) {
+        clearTimeout(this.retryTimer);
+        delete this.retryTimer;
+      }
+      this.retryTimer = setTimeout(this.connect.bind(this), 5000);
     }
   }
 
