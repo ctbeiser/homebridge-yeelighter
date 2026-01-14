@@ -513,6 +513,8 @@ export class YeeAccessory {
             `No update received within ${updateSince}s (Threshold: ${updateThreshold} (${this.platform.config.timeout}+${this.platform.config.interval}) => switching to unreachable`
           );
           this.onDeviceDisconnected();
+          this.device.disconnect(false);
+          this.device.reconnect();
         } else {
           this.sendHeartbeat();
         }
