@@ -488,7 +488,7 @@ export class YeeAccessory {
   private clearOldTransactions() {
     for (const [key, item] of this.transactions.entries()) {
       // clear transactions older than 60s
-      if (item.timestamp > Date.now() + 60_000) {
+      if (item.timestamp < Date.now() - 60_000) {
         this.log(`error: timeout for request ${key}`);
         item.reject(new Error("timeout"));
         this.transactions.delete(key);
