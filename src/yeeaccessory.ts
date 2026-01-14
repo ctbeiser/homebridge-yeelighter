@@ -499,9 +499,10 @@ export class YeeAccessory {
   private onInterval = () => {
     if (this.connected) {
       // if flooded wait for 5 minutes
-      if (this.floodAlarm && Date.now() - this.floodAlarm > 180_000_000) {
+      if (this.floodAlarm && Date.now() - this.floodAlarm < 300_000) {
         this.log(`flooded. waiting ${(Date.now() - this.floodAlarm) / 60_000}s`);
       } else {
+        this.floodAlarm = undefined;
         // seconds since last update
         const updateSince = (Date.now() - this.updateTimestamp) / 1000;
         const updateThreshold =
