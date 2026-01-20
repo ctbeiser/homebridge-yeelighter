@@ -12,6 +12,13 @@ import {
 
 export class TemperatureLightService extends LightService implements ConcreteLightService {
   private adaptiveLightingController: AdaptiveLightingController;
+  private pendingCt?: number;
+  private offCtTimer?: NodeJS.Timeout;
+  private offCtLastSentAt = 0;
+  // Adaptive Lighting can keep sending CT updates while the bulb is off.
+  // We still forward them so the bulb "remembers" the latest CT for next power-on,
+  // but rate-limit to reduce needless network churn.
+  private readonly offCtRateLimitMs = 300_000; // 5 minutes
   constructor(parameters: LightServiceParameters) {
     super(parameters);
     this.service.displayName = "Temperature Light";
@@ -45,11 +52,23 @@ export class TemperatureLightService extends LightService implements ConcreteLig
       this.debug("found blocker when setting manual power");
       return;
     }
-    this.timer = setTimeout(() => {
+    this.timer = setTimeout(async () => {
       this.debug("sending power command", mode);
       if (mode === undefined) {
         this.sendCommand("set_power", ["off", "smooth", 500]);
       } else {
+        // Apply the latest queued CT *before* turning on so we don't get a
+        // visible "turn on then shift temperature" effect.
+        if (this.pendingCt !== undefined) {
+          const ct = this.pendingCt;
+          this.pendingCt = undefined;
+          if (this.offCtTimer) {
+            clearTimeout(this.offCtTimer);
+            this.offCtTimer = undefined;
+          }
+          await this.sendAnimatedCommand("set_ct_abx", ct);
+          this.setAttributes({ ct });
+        }
         this.sendCommand("set_power", ["on", "sudden", 0, mode]);
         this.powerMode = mode;
       }
@@ -69,6 +88,18 @@ export class TemperatureLightService extends LightService implements ConcreteLig
     if (mode === undefined) {
       await this.sendCommand("set_power", ["off", "smooth", 500]);
     } else {
+      // Apply the latest queued CT *before* turning on so we don't get a
+      // visible "turn on then shift temperature" effect.
+      if (this.pendingCt !== undefined) {
+        const ct = this.pendingCt;
+        this.pendingCt = undefined;
+        if (this.offCtTimer) {
+          clearTimeout(this.offCtTimer);
+          this.offCtTimer = undefined;
+        }
+        await this.sendAnimatedCommand("set_ct_abx", ct);
+        this.setAttributes({ ct });
+      }
       this.powerMode = mode;
       await this.sendCommand("set_power", ["on", "sudden", 0, mode]);
       this.blocker = true;
@@ -159,9 +190,43 @@ export class TemperatureLightService extends LightService implements ConcreteLig
         return convertColorTemperature(attributes.ct);
       },
       async (value) => {
+        // HomeKit Adaptive Lighting may continue to push ColorTemperature updates while the
+        // accessory is "off". We still forward those to keep the bulb's stored CT in sync,
+        // but we rate-limit while off to reduce needless network churn.
+        const attributes = await this.attributes();
+        const kelvin = convertColorTemperature(value);
+        if (!attributes.power) {
+          this.pendingCt = kelvin;
+          this.setAttributes({ ct: kelvin });
+          const now = Date.now();
+          const elapsed = now - this.offCtLastSentAt;
+          if (this.offCtLastSentAt === 0 || elapsed >= this.offCtRateLimitMs) {
+            this.offCtLastSentAt = now;
+            await this.sendAnimatedCommand("set_ct_abx", kelvin);
+            return;
+          }
+          if (!this.offCtTimer) {
+            const delay = Math.max(0, this.offCtRateLimitMs - elapsed);
+            this.offCtTimer = setTimeout(async () => {
+              this.offCtTimer = undefined;
+              if (this.pendingCt !== undefined) {
+                const ct = this.pendingCt;
+                this.offCtLastSentAt = Date.now();
+                await this.sendAnimatedCommand("set_ct_abx", ct);
+              }
+            }, delay);
+          }
+          return;
+        }
+
         await this.ensurePowerMode(POWERMODE_CT);
-        await this.sendAnimatedCommand("set_ct_abx", convertColorTemperature(value));
-        this.setAttributes({ ct: convertColorTemperature(value) });
+        // If we were off and had queued CT updates, clear any pending timer.
+        if (this.offCtTimer) {
+          clearTimeout(this.offCtTimer);
+          this.offCtTimer = undefined;
+        }
+        await this.sendAnimatedCommand("set_ct_abx", kelvin);
+        this.setAttributes({ ct: kelvin });
 
         this.saveDefaultIfNeeded();
       }
