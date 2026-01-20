@@ -12,6 +12,7 @@ import {
 
 export class TemperatureLightService extends LightService implements ConcreteLightService {
   private adaptiveLightingController: AdaptiveLightingController;
+  private pendingCt?: number;
   constructor(parameters: LightServiceParameters) {
     super(parameters);
     this.service.displayName = "Temperature Light";
@@ -45,11 +46,17 @@ export class TemperatureLightService extends LightService implements ConcreteLig
       this.debug("found blocker when setting manual power");
       return;
     }
-    this.timer = setTimeout(() => {
+    this.timer = setTimeout(async () => {
       this.debug("sending power command", mode);
       if (mode === undefined) {
         this.sendCommand("set_power", ["off", "smooth", 500]);
       } else {
+        if (this.pendingCt !== undefined) {
+          const ct = this.pendingCt;
+          this.pendingCt = undefined;
+          await this.sendAnimatedCommand("set_ct_abx", ct);
+          this.setAttributes({ ct });
+        }
         this.sendCommand("set_power", ["on", "sudden", 0, mode]);
         this.powerMode = mode;
       }
@@ -69,6 +76,12 @@ export class TemperatureLightService extends LightService implements ConcreteLig
     if (mode === undefined) {
       await this.sendCommand("set_power", ["off", "smooth", 500]);
     } else {
+      if (this.pendingCt !== undefined) {
+        const ct = this.pendingCt;
+        this.pendingCt = undefined;
+        await this.sendAnimatedCommand("set_ct_abx", ct);
+        this.setAttributes({ ct });
+      }
       this.powerMode = mode;
       await this.sendCommand("set_power", ["on", "sudden", 0, mode]);
       this.blocker = true;
@@ -157,9 +170,17 @@ export class TemperatureLightService extends LightService implements ConcreteLig
         return convertColorTemperature(attributes.ct);
       },
       async (value) => {
+        const kelvin = convertColorTemperature(value);
+        const attributes = await this.attributes();
+        if (!attributes.power) {
+          this.pendingCt = kelvin;
+          this.setAttributes({ ct: kelvin });
+          return;
+        }
+
         await this.ensurePowerMode(POWERMODE_CT);
-        await this.sendAnimatedCommand("set_ct_abx", convertColorTemperature(value));
-        this.setAttributes({ ct: convertColorTemperature(value) });
+        await this.sendAnimatedCommand("set_ct_abx", kelvin);
+        this.setAttributes({ ct: kelvin });
 
         this.saveDefaultIfNeeded();
       }
