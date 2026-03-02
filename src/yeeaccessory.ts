@@ -118,6 +118,7 @@ export class YeeAccessory {
     let name = deviceInfo.id;
     this.connected = false;
     const override: OverrideLightConfiguration[] = (platform.config.override as OverrideLightConfiguration[]) || [];
+    const manual: OverrideLightConfiguration[] = (platform.config.manual as OverrideLightConfiguration[]) || [];
 
     if (!specs) {
       specs = { ...EMPTY_SPECS };
@@ -134,18 +135,23 @@ export class YeeAccessory {
         specs.colorTemperature.max = 0;
       }
     }
-    const overrideConfig: OverrideLightConfiguration | undefined = override?.find((item) => item.id === deviceInfo.id);
-    if (overrideConfig?.backgroundLight) {
+    const manualConfig = manual.find((item) => item.id === deviceInfo.id);
+    const explicitOverrideConfig = override.find((item) => item.id === deviceInfo.id);
+    const overrideConfig =
+      manualConfig || explicitOverrideConfig
+        ? ({ id: deviceInfo.id, ...manualConfig, ...explicitOverrideConfig } as OverrideLightConfiguration)
+        : undefined;
+    if (overrideConfig?.backgroundLight !== undefined) {
       specs.backgroundLight = overrideConfig.backgroundLight;
     }
-    if (overrideConfig?.color) {
+    if (overrideConfig?.color !== undefined) {
       specs.color = overrideConfig.color;
     }
     if (overrideConfig?.name) {
       name = overrideConfig.name;
     }
     this.name = name;
-    if (overrideConfig?.nightLight) {
+    if (overrideConfig?.nightLight !== undefined) {
       specs.nightLight = overrideConfig.nightLight;
     }
     this.specs = specs;
@@ -198,10 +204,12 @@ export class YeeAccessory {
 
   protected get config(): OverrideLightConfiguration {
     const override = (this.platform.config.override || []) as OverrideLightConfiguration[];
+    const manual = (this.platform.config.manual || []) as OverrideLightConfiguration[];
     const { device } = this.accessory.context;
     const overrideConfig: OverrideLightConfiguration | undefined = override.find((item) => item.id === device.id);
+    const manualConfig: OverrideLightConfiguration | undefined = manual.find((item) => item.id === device.id);
 
-    return overrideConfig || { id: device.id };
+    return { id: device.id, ...manualConfig, ...overrideConfig };
   }
 
   public debug = (message?: unknown, ...optionalParameters: unknown[]): void => {

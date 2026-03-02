@@ -264,10 +264,12 @@ export class LightService {
 
   protected get config(): OverrideLightConfiguration {
     const override = (this.platform.config.override || []) as OverrideLightConfiguration[];
+    const manual = (this.platform.config.manual || []) as OverrideLightConfiguration[];
     const { info } = this.device;
     const overrideConfig: OverrideLightConfiguration | undefined = override.find((item) => item.id === info.id);
+    const manualConfig: OverrideLightConfiguration | undefined = manual.find((item) => item.id === info.id);
 
-    return overrideConfig || { id: info.id };
+    return { id: info.id, ...manualConfig, ...overrideConfig };
   }
 
   get specs(): Specs {

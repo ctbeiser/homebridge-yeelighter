@@ -99,9 +99,13 @@ export class YeelighterPlatform implements DynamicPlatformPlugin {
       const trackedAttributes = TRACKED_ATTRIBUTES; // .filter(attribute => supportedAttributes.includes(attribute));
 
       const override: OverrideLightConfiguration[] = (this.config.override as OverrideLightConfiguration[]) || [];
-      const overrideConfig: OverrideLightConfiguration | undefined = override.find(
-        (item) => item.id === detectedInfo.id
-      );
+      const manual: OverrideLightConfiguration[] = (this.config.manual as OverrideLightConfiguration[]) || [];
+      const manualConfig = manual.find((item) => item.id === detectedInfo.id);
+      const explicitOverrideConfig = override.find((item) => item.id === detectedInfo.id);
+      const overrideConfig =
+        manualConfig || explicitOverrideConfig
+          ? ({ id: detectedInfo.id, ...manualConfig, ...explicitOverrideConfig } as OverrideLightConfiguration)
+          : undefined;
       const support = detectedInfo.support || "";
       const separateAmbient =
         ((this.config?.split && overrideConfig?.separateAmbient !== false) ||
