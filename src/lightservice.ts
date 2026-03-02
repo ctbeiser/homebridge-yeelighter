@@ -354,8 +354,9 @@ export class LightService {
 
   protected async sendAnimatedCommand(method: string, parameters: string | number | boolean | Array<number>) {
     const messageParameters = Array.isArray(parameters) ? parameters : [parameters];
-    if (this.platform.config?.animateChanges) {
-      const animationTime = this.platform.config?.animationTime ?? 500;
+    const configuredAnimation = Number(this.platform.config?.animateChanges ?? this.platform.config?.animationTime ?? 0);
+    const animationTime = Number.isFinite(configuredAnimation) ? Math.max(0, configuredAnimation) : 0;
+    if (animationTime > 0) {
       if (this.debounceTimers[method]) {
         clearTimeout(this.debounceTimers[method]);
       }
