@@ -113,7 +113,7 @@ export class YeeAccessory {
     if (!deviceInfo || !deviceInfo.support || !deviceInfo.model) {
       this.error(`deviceInfo is corrupt or emtpy: ${JSON.stringify(deviceInfo)}`);
     }
-    const support = deviceInfo.support.split(" ");
+    const support = (deviceInfo.support || "").split(/[ ,]+/).filter((item) => item.length > 0);
     let specs = MODEL_SPECS[deviceInfo.model];
     let name = deviceInfo.id;
     this.connected = false;
@@ -459,8 +459,8 @@ export class YeeAccessory {
     if (!this.connected) {
       this.warn("send command but device doesn't seem connected");
     }
-    const supportedCommands = this.device.info.support.split(",");
-    if (!supportedCommands.includes) {
+    const supportedCommands = (this.device.info.support || "").split(/[ ,]+/).filter((item) => item.length > 0);
+    if (supportedCommands.length > 0 && !supportedCommands.includes(method)) {
       this.warn(`sending ${method} although unsupported.`);
     }
     const id = this.lastCommandId + 1;
