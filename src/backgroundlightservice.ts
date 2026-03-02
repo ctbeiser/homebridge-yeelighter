@@ -19,6 +19,8 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
   }
 
   private async installHandlers() {
+    const allowCtForColor =
+      this.platform.config.ctforcolor !== false && this.platform.config.ctforcolor !== "false";
     this.handleCharacteristic(
       this.platform.Characteristic.On,
       async () => this.getAttribute("bg_power"),
@@ -65,7 +67,7 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
         this.saveDefaultIfNeeded();
       }
     );
-    if (this.platform.config.ctforcolor === undefined || this.platform.config.ctforcolor) {
+    if (allowCtForColor) {
       const characteristic = this.handleCharacteristic(
         this.platform.Characteristic.ColorTemperature,
         async () => {

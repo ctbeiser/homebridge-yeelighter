@@ -17,6 +17,8 @@ export class ColorLightService extends LightService implements ConcreteLightServ
   }
 
   private async installHandlers() {
+    const allowCtForColor =
+      this.platform.config.ctforcolor !== false && this.platform.config.ctforcolor !== "false";
     this.handleCharacteristic(
       this.platform.Characteristic.On,
       async () => this.getAttribute("power"),
@@ -40,7 +42,7 @@ export class ColorLightService extends LightService implements ConcreteLightServ
         this.saveDefaultIfNeeded();
       }
     );
-    if (this.platform.config.ctforcolor) {
+    if (allowCtForColor) {
       const characteristic = this.handleCharacteristic(
         this.platform.Characteristic.ColorTemperature,
         async () => {
