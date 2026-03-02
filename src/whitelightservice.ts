@@ -20,7 +20,11 @@ export class WhiteLightService extends LightService implements ConcreteLightServ
         const attributes = await this.attributes();
         return attributes.power;
       },
-      (value) => this.sendCommand("set_power", [value ? "on" : "off", "smooth", 500, 0])
+      async (value) => {
+        this.cancelAllDebounces();
+        await this.sendCommand("set_power", [value ? "on" : "off", "smooth", 500, 0]);
+        this.setAttributes({ power: value });
+      }
     );
     this.handleCharacteristic(
       this.platform.Characteristic.Brightness,
@@ -35,6 +39,7 @@ export class WhiteLightService extends LightService implements ConcreteLightServ
           this.setAttributes({ power: true, bright: value });
           this.saveDefaultIfNeeded();
         } else {
+          this.cancelAllDebounces();
           await this.sendSuddenCommand("set_power", "off");
           this.setAttributes({ power: false, bright: 0 });
         }

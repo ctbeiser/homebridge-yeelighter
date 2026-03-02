@@ -23,6 +23,7 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
       this.platform.Characteristic.On,
       async () => this.getAttribute("bg_power"),
       async (value) => {
+        this.cancelAllDebounces();
         if (this.platform.config.faultyYeelightBackgroundToggling && value) {
           // We have to set lastSat & lastHue as it is used by setHSV command
           if (this.lastSat === undefined) {
@@ -43,6 +44,7 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
             POWERMODE_HSV
           ]);
         }
+        this.setAttributes({ bg_power: value });
       }
     );
     this.handleCharacteristic(

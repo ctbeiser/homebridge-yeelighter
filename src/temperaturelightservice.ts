@@ -103,6 +103,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
           this.log(`Ignoring explicit power on`);
         } else {
           this.debug(`Manual power setting with powerMode: ${this.powerMode}`, value);
+          this.cancelAllDebounces();
 
           if (value) {
             this.sendDebouncedPower(this.powerMode || POWERMODE_CT);
