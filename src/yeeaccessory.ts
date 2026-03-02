@@ -243,7 +243,7 @@ export class YeeAccessory {
           this.platform.config.timeout || 1000
         );
         // Cache the response with the current timestamp
-        this.lastFetchTime = now;
+        this.lastFetchTime = Date.now();
         return this.attributes;
       } catch (error: unknown) {
         if (error instanceof Error && error.message === "__timeout__") {
@@ -265,7 +265,7 @@ export class YeeAccessory {
         this.fetchInProgress = undefined;
       }
     })();
-    return this.attributes;
+    return this.fetchInProgress;
   };
 
   public setAttributes(attributes: Partial<Attributes>) {
