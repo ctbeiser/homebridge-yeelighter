@@ -24,7 +24,7 @@ interface ManualOverride {
   backgroundLight: boolean;
   nightLight: boolean;
   separateAmbient?: boolean;
-  support: string;
+  support?: string;
 }
 
 /**
@@ -102,10 +102,11 @@ export class YeelighterPlatform implements DynamicPlatformPlugin {
       const overrideConfig: OverrideLightConfiguration | undefined = override.find(
         (item) => item.id === detectedInfo.id
       );
+      const support = detectedInfo.support || "";
       const separateAmbient =
         ((this.config?.split && overrideConfig?.separateAmbient !== false) ||
           overrideConfig?.separateAmbient === true) &&
-        (detectedInfo.support.includes("bg_set_power") || !!overrideConfig?.backgroundLight);
+        (support.includes("bg_set_power") || !!overrideConfig?.backgroundLight);
 
       const newDeviceInfo: DeviceInfo = {
         ...detectedInfo,
@@ -256,8 +257,8 @@ export class YeelighterPlatform implements DynamicPlatformPlugin {
       deviceInfo.host = parsedUrl.hostname || "";
       deviceInfo.port = Number(parsedUrl.port || "55443");
       deviceInfo.id = manualAccessory.id;
-      deviceInfo.model = manualAccessory.model;
-      deviceInfo.support = manualAccessory.support;
+      deviceInfo.model = manualAccessory.model || "unknown";
+      deviceInfo.support = manualAccessory.support || "";
       this.onDeviceDiscovery(deviceInfo);
     }
   }
