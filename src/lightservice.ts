@@ -159,6 +159,7 @@ export class LightService {
   protected light: YeeAccessory;
   protected name: string;
   private debounceTimers: Record<string, NodeJS.Timeout> = {};
+  private activeCharacteristicGets = 0;
 
   constructor(
     parameters: LightServiceParameters,
@@ -263,13 +264,7 @@ export class LightService {
   };
 
   protected get config(): OverrideLightConfiguration {
-    const override = (this.platform.config.override || []) as OverrideLightConfiguration[];
-    const manual = (this.platform.config.manual || []) as OverrideLightConfiguration[];
-    const { info } = this.device;
-    const overrideConfig: OverrideLightConfiguration | undefined = override.find((item) => item.id === info.id);
-    const manualConfig: OverrideLightConfiguration | undefined = manual.find((item) => item.id === info.id);
-
-    return { id: info.id, ...manualConfig, ...overrideConfig };
+    return this.light.overrideConfig || { id: this.device.info.id };
   }
 
   get specs(): Specs {
@@ -277,6 +272,9 @@ export class LightService {
   }
 
   public async attributes() {
+    if (this.activeCharacteristicGets > 0) {
+      return this.light.getAttributesFast();
+    }
     return this.light.getAttributes();
   }
 
@@ -298,7 +296,12 @@ export class LightService {
     characteristic.on("get", async (callback) => {
       try {
         if (this.light.connected) {
-          callback(undefined, await getter());
+          this.activeCharacteristicGets += 1;
+          try {
+            callback(undefined, await getter());
+          } finally {
+            this.activeCharacteristicGets -= 1;
+          }
         } else {
           callback(new Error("light disconnected"));
         }
@@ -370,13 +373,14 @@ export class LightService {
     const configuredAnimation = Number(this.platform.config?.animateChanges ?? this.platform.config?.animationTime ?? 0);
     const animationTime = Number.isFinite(configuredAnimation) ? Math.max(0, configuredAnimation) : 0;
     if (animationTime > 0) {
+      const debounceMs = Math.min(75, animationTime);
       if (this.debounceTimers[method]) {
         clearTimeout(this.debounceTimers[method]);
       }
       this.debounceTimers[method] = setTimeout(async () => {
         await this.sendCommandPromiseWithErrorHandling(method, [...messageParameters, "smooth", animationTime]);
         delete this.debounceTimers[method];
-      }, animationTime);
+      }, debounceMs);
       return;
     } else {
       return this.sendCommandPromiseWithErrorHandling(method, [...messageParameters, "sudden", 0]);

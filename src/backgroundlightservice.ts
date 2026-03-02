@@ -107,7 +107,7 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
   }
 
   public onAttributesUpdated = (newAttributes: Attributes) => {
-    this.debug(`backlight updated ${JSON.stringify(newAttributes)}`);
+    this.debug("backlight updated", newAttributes);
     this.powerMode = powerModeFromColorModeAndActiveMode(newAttributes.bg_lmode, 0);
 
     this.updateCharacteristic(this.platform.Characteristic.Saturation, newAttributes.bg_sat);

@@ -47,7 +47,7 @@ export class ColorLightService extends LightService implements ConcreteLightServ
         this.platform.Characteristic.ColorTemperature,
         async () => {
           const attributes = await this.attributes();
-          this.debug(`getCT: ${JSON.stringify(attributes)} -> ${convertColorTemperature(attributes.ct)}`);
+          this.debug("getCT", { ct: attributes.ct });
           return convertColorTemperature(attributes.ct);
         },
         async (value) => {
@@ -70,7 +70,7 @@ export class ColorLightService extends LightService implements ConcreteLightServ
       this.platform.Characteristic.Hue,
       async () => {
         const attributes = await this.attributes();
-        this.log(`getHue: ${JSON.stringify(attributes)}`);
+        this.debug("getHue", { hue: attributes.hue });
         return attributes.hue;
       },
       async (value) => {
@@ -82,7 +82,7 @@ export class ColorLightService extends LightService implements ConcreteLightServ
       this.platform.Characteristic.Saturation,
       async () => {
         const attributes = await this.attributes();
-        this.debug(`getSat: ${JSON.stringify(attributes)}`);
+        this.debug("getSat", { sat: attributes.sat });
         return attributes.sat;
       },
       async (value) => {
@@ -93,7 +93,7 @@ export class ColorLightService extends LightService implements ConcreteLightServ
   }
 
   public onAttributesUpdated = (newAttributes: Attributes) => {
-    this.debug(`color light updated ${JSON.stringify(newAttributes)}`);
+    this.debug("color light updated", newAttributes);
     this.powerMode = powerModeFromColorModeAndActiveMode(newAttributes.color_mode, newAttributes.active_mode);
     if (this.powerMode === POWERMODE_HSV) {
       this.updateCharacteristic(this.platform.Characteristic.Saturation, newAttributes.sat);

@@ -42,6 +42,7 @@ interface Deferred<T> {
   resolve: (value: T) => void;
   reject: (error: Error) => void;
   timestamp: number;
+  timeout?: NodeJS.Timeout;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, timeoutError = new Error("__timeout__")): Promise<T> {
@@ -79,6 +80,8 @@ export class YeeAccessory {
   private keepAlives = new Set<number>();
 
   private static handledAccessories = new Map<string, YeeAccessory>();
+  private static readonly ATTRIBUTE_CACHE_MS = 1000;
+  private static readonly TRANSACTION_MAX_AGE_MS = 60_000;
   private floodAlarm?: number;
 
   public static instance(
@@ -141,6 +144,7 @@ export class YeeAccessory {
       manualConfig || explicitOverrideConfig
         ? ({ id: deviceInfo.id, ...manualConfig, ...explicitOverrideConfig } as OverrideLightConfiguration)
         : undefined;
+    this.overrideConfig = overrideConfig || { id: deviceInfo.id };
     if (overrideConfig?.backgroundLight !== undefined) {
       specs.backgroundLight = overrideConfig.backgroundLight;
     }
@@ -203,13 +207,7 @@ export class YeeAccessory {
   }
 
   protected get config(): OverrideLightConfiguration {
-    const override = (this.platform.config.override || []) as OverrideLightConfiguration[];
-    const manual = (this.platform.config.manual || []) as OverrideLightConfiguration[];
-    const { device } = this.accessory.context;
-    const overrideConfig: OverrideLightConfiguration | undefined = override.find((item) => item.id === device.id);
-    const manualConfig: OverrideLightConfiguration | undefined = manual.find((item) => item.id === device.id);
-
-    return { id: device.id, ...manualConfig, ...overrideConfig };
+    return this.overrideConfig || { id: this.device.info.id };
   }
 
   public debug = (message?: unknown, ...optionalParameters: unknown[]): void => {
@@ -231,53 +229,75 @@ export class YeeAccessory {
   private lastFetchTime?: number;
   private fetchInProgress?: Promise<Attributes>;
 
-  public getAttributes = async (): Promise<Attributes> => {
-    const now = Date.now();
+  private shouldRefreshAttributes(now = Date.now()): boolean {
+    return !this.lastFetchTime || now - this.lastFetchTime >= YeeAccessory.ATTRIBUTE_CACHE_MS;
+  }
 
-    // Check if we have a cached response and if it's less than a second old
-    if (this.lastFetchTime && now - this.lastFetchTime < 1000) {
-      return this.attributes;
-    }
-
+  private startAttributeFetch(): Promise<Attributes> {
     if (this.fetchInProgress) {
       return this.fetchInProgress;
     }
-
-    // Start a new fetch
     this.fetchInProgress = (async () => {
       try {
         await withTimeout(
           this.sendCommandPromise("get_prop", this.device.info.trackedAttributes),
           this.platform.config.timeout || 1000
         );
-        // Cache the response with the current timestamp
         this.lastFetchTime = Date.now();
         return this.attributes;
       } catch (error: unknown) {
         if (error instanceof Error && error.message === "__timeout__") {
-          if (this.attributes.name == "unknown") {
-            this.warn("Retrieving attributes timed out. Using last attributes.");
-          } else {
-            this.error("Retrieving attributes timed out. Returning EMPTY attributes.");
-            // can't throw here - it would take down homebridge
-            // throw new Error("timeout");
-          }
-          // If the request times out, return the cached response
+          this.warn("Retrieving attributes timed out. Returning cached attributes.");
           return this.attributes;
         }
-        this.warn("Retrieving attributes failed. Using last attributes.", error);
-        // If there's an error and we have a cached response, return it
+        this.warn("Retrieving attributes failed. Returning cached attributes.", error);
         return this.attributes;
       } finally {
-        // Clear the fetchInProgress flag
         this.fetchInProgress = undefined;
       }
     })();
     return this.fetchInProgress;
+  }
+
+  public getAttributes = async (): Promise<Attributes> => {
+    if (!this.shouldRefreshAttributes()) {
+      return this.attributes;
+    }
+
+    return this.startAttributeFetch();
+  };
+
+  public getAttributesFast = (): Attributes => {
+    if (this.shouldRefreshAttributes() && !this.fetchInProgress) {
+      void this.startAttributeFetch();
+    }
+    return this.attributes;
   };
 
   public setAttributes(attributes: Partial<Attributes>) {
     this.attributes = { ...this.attributes, ...attributes };
+  }
+
+  private static areAttributesEqual(left: Attributes, right: Attributes): boolean {
+    for (const key of TRACKED_ATTRIBUTES) {
+      if (left[key] !== right[key]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private finalizeTransaction(id: number): Deferred<void> | undefined {
+    const transaction = this.transactions.get(id);
+    if (!transaction) {
+      return undefined;
+    }
+    this.transactions.delete(id);
+    if (transaction.timeout) {
+      clearTimeout(transaction.timeout);
+      transaction.timeout = undefined;
+    }
+    return transaction;
   }
 
   private onDeviceUpdate = (update: IncomingMessage) => {
@@ -291,7 +311,7 @@ export class YeeAccessory {
       return;
     }
     // the the promise for the transaction
-    const transaction = this.transactions.get(id);
+    const transaction = this.finalizeTransaction(id);
     const keepAlive = this.keepAlives.delete(id);
     if (!transaction && !keepAlive) {
       this.warn(`no transactions found for ${id}`);
@@ -299,7 +319,6 @@ export class YeeAccessory {
     if (transaction) {
       const seconds = (Date.now() - transaction.timestamp) / 1000;
       this.debug(`transaction ${id} took ${seconds}s`, update);
-      this.transactions.delete(id);
     }
     if (result && result.length === 1 && result[0] === "ok") {
       this.connected = true;
@@ -314,7 +333,7 @@ export class YeeAccessory {
       }
 
       const seconds = (Date.now() - this.heartbeatTimestamp) / 1000;
-      this.debug(`received update ${id} after ${seconds}s: ${JSON.stringify(result)}`);
+      this.debug(`received update ${id} after ${seconds}s`, result);
       const newAttributes = { ...EMPTY_ATTRIBUTES };
       for (const key of Object.keys(this.attributes)) {
         const index = TRACKED_ATTRIBUTES.indexOf(key);
@@ -336,6 +355,7 @@ export class YeeAccessory {
         }
       }
 
+      this.lastFetchTime = Date.now();
       this.onUpdateAttributes(newAttributes);
       transaction?.resolve();
     } else if (error) {
@@ -344,7 +364,7 @@ export class YeeAccessory {
         this.floodAlarm = Date.now();
         // this.onDeviceDisconnected();
       } else {
-        this.error(`Error returned for request [${id}]: ${JSON.stringify(error)}`);
+        this.error(`Error returned for request [${id}]`, error);
       }
       transaction?.reject(error);
     } else {
@@ -354,7 +374,7 @@ export class YeeAccessory {
   };
 
   private onUpdateAttributes = (newAttributes: Attributes) => {
-    if (JSON.stringify(this.attributes) !== JSON.stringify(newAttributes)) {
+    if (!YeeAccessory.areAttributesEqual(this.attributes, newAttributes)) {
       if (!this.config?.blocking) {
         for (const service of this.services) {
           service.onAttributesUpdated(newAttributes);
@@ -472,7 +492,7 @@ export class YeeAccessory {
       this.warn(`sending ${method} although unsupported.`);
     }
     const id = this.lastCommandId + 1;
-    this.debug(`sendCommand(${id}, ${method}, ${JSON.stringify(parameters)})`);
+    this.debug(`sendCommand(${id}, ${method})`, parameters);
     this.device.sendCommand({ id, method, params: parameters });
     this.lastCommandId = id;
     return id;
@@ -490,25 +510,23 @@ export class YeeAccessory {
       const timestamp = Date.now();
       const id = this.sendCommand(method, parameters);
       this.debug(`sent command ${id}: ${method}`, parameters);
-      this.transactions.set(id, { resolve, reject, timestamp });
       const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
-      setTimeout(() => {
-        const pending = this.transactions.get(id);
+      const timeout = setTimeout(() => {
+        const pending = this.finalizeTransaction(id);
         if (pending) {
-          this.transactions.delete(id);
           pending.reject(new Error(`timeout waiting for response to "${method}"`));
         }
       }, timeoutMs);
+      this.transactions.set(id, { resolve, reject, timestamp, timeout });
     });
   }
 
   private clearOldTransactions() {
     for (const [key, item] of this.transactions.entries()) {
       // clear transactions older than 60s
-      if (item.timestamp < Date.now() - 60_000) {
+      if (item.timestamp < Date.now() - YeeAccessory.TRANSACTION_MAX_AGE_MS) {
         this.log(`error: timeout for request ${key}`);
-        item.reject(new Error("timeout"));
-        this.transactions.delete(key);
+        this.finalizeTransaction(key)?.reject(new Error("timeout"));
       }
     }
   }
