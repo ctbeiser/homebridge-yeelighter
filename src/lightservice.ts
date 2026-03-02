@@ -294,19 +294,29 @@ export class LightService {
       throw new Error("Could not get Characteristic");
     }
     characteristic.on("get", async (callback) => {
-      if (this.light.connected) {
-        callback(undefined, await getter());
-      } else {
-        callback(new Error("light disconnected"));
+      try {
+        if (this.light.connected) {
+          callback(undefined, await getter());
+        } else {
+          callback(new Error("light disconnected"));
+        }
+      } catch (error) {
+        this.warn("Characteristic get failed", uuid, error);
+        callback(error instanceof Error ? error : new Error("failed to get characteristic"));
       }
     });
     characteristic.on("set", async (value, callback) => {
-      if (this.light.connected && isValidValue(value)) {
-        await setter(value);
-        callback();
-      } else {
-        this.log(`failed to set to value`, value, this.light.connected);
-        callback(new Error("light disconnected or invalid value"));
+      try {
+        if (this.light.connected && isValidValue(value)) {
+          await setter(value);
+          callback();
+        } else {
+          this.log(`failed to set to value`, value, this.light.connected);
+          callback(new Error("light disconnected or invalid value"));
+        }
+      } catch (error) {
+        this.warn("Characteristic set failed", uuid, value, error);
+        callback(error instanceof Error ? error : new Error("failed to set characteristic"));
       }
     });
     return characteristic;
@@ -315,7 +325,8 @@ export class LightService {
   protected async updateCharacteristic(uuid: any, value: boolean | number | string) {
     const characteristic = this.service.getCharacteristic(uuid);
     if (!characteristic) {
-      throw undefined;
+      this.warn("Could not get Characteristic for update", uuid);
+      return;
     }
     if (isValidValue(value)) {
       characteristic.updateValue(value);
