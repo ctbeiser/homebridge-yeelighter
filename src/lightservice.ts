@@ -390,7 +390,7 @@ export class LightService {
   protected async setHSV(prefix = "") {
     const hue = this.lastHue;
     const sat = this.lastSat;
-    if (hue && sat) {
+    if (hue !== undefined && sat !== undefined) {
       await this.ensurePowerMode(POWERMODE_HSV, prefix);
       const hsv = [hue, sat];
       delete this.lastHue;

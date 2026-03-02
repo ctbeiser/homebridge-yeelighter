@@ -10,8 +10,8 @@ import {
 } from "./lightservice";
 
 export class BackgroundLightService extends LightService implements ConcreteLightService {
-  lastHue: any;
-  lastSat: any;
+  lastHue?: number;
+  lastSat?: number;
   constructor(parameters: LightServiceParameters) {
     super(parameters, "background");
     this.service.displayName = "Background Light";
@@ -25,10 +25,10 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
       async (value) => {
         if (this.platform.config.faultyYeelightBackgroundToggling && value) {
           // We have to set lastSat & lastHue as it is used by setHSV command
-          if (!this.lastSat) {
+          if (this.lastSat === undefined) {
             this.lastSat = await this.getAttribute("bg_sat");
           }
-          if (!this.lastHue) {
+          if (this.lastHue === undefined) {
             this.lastHue = await this.getAttribute("bg_hue");
           }
           // Then to workaround issue with turning the light ON, we send set_scene command with built-in scene id 9_055_202
