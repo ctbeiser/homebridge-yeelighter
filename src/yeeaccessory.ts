@@ -483,6 +483,14 @@ export class YeeAccessory {
       const id = this.sendCommand(method, parameters);
       this.debug(`sent command ${id}: ${method}`, parameters);
       this.transactions.set(id, { resolve, reject, timestamp });
+      const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
+      setTimeout(() => {
+        const pending = this.transactions.get(id);
+        if (pending) {
+          this.transactions.delete(id);
+          pending.reject(new Error(`timeout waiting for response to "${method}"`));
+        }
+      }, timeoutMs);
     });
   }
 
