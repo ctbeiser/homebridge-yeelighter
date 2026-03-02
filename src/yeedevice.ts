@@ -62,6 +62,7 @@ export class Device extends EventEmitter {
   retryTimer?: NodeJS.Timeout;
   socket?: net.Socket;
   rest = "";
+  private lastSocketError?: NodeJS.ErrnoException;
   constructor(info: DeviceInfo) {
     super();
     this.info = info;
@@ -86,7 +87,7 @@ export class Device extends EventEmitter {
       }
       const socket = new net.Socket({ allowHalfOpen: false });
       this.socket = socket;
-      this.bindSocket();
+      this.bindSocket(socket);
       socket.connect({ host: this.info.host, port: this.info.port }, () => {
         if (this.socket !== socket) {
           return;
@@ -95,7 +96,7 @@ export class Device extends EventEmitter {
         this.emit("connected");
       });
     } catch (error: any) {
-      this.socketClosed(error);
+      this.socketClosed(error, this.socket);
     }
   }
 
@@ -111,29 +112,43 @@ export class Device extends EventEmitter {
     }
   }
 
-  bindSocket() {
-    this.socket?.on("data", (data) => {
+  bindSocket(socket: net.Socket) {
+    socket.on("data", (data) => {
       this.didReceiveResponse(data);
     });
 
-    this.socket?.on("error", (error) => {
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      if (this.socket !== socket) {
+        return;
+      }
+      this.lastSocketError = error;
       this.emit("socketError", error);
-      this.socketClosed(error);
+      this.emit("deviceError", error);
     });
 
-    this.socket?.on("end", () => {
+    socket.on("end", () => {
+      if (this.socket !== socket) {
+        return;
+      }
       this.emit("socketEnd");
-      this.socketClosed();
     });
 
-    this.socket?.on("close", () => {
+    socket.on("close", () => {
+      if (this.socket !== socket) {
+        return;
+      }
       this.emit("socketClose");
-      this.socketClosed();
+      const error = this.lastSocketError;
+      this.lastSocketError = undefined;
+      this.socketClosed(error, socket);
     });
   }
 
-  socketClosed(error?: Error) {
+  socketClosed(error?: Error, socket?: net.Socket) {
     if (this.forceDisconnect) {
+      return;
+    }
+    if (socket && this.socket !== socket) {
       return;
     }
 
@@ -191,7 +206,7 @@ export class Device extends EventEmitter {
       try {
         this.socket.write(cmd + "\r\n");
       } catch (error: any) {
-        this.socketClosed(error);
+        this.socketClosed(error, this.socket);
       }
     }
   }
