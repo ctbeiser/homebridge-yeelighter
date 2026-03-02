@@ -15,7 +15,7 @@
       "timeout": {
         "title": "Timeout for requests",
         "type": "integer",
-        "default": "2000",
+        "default": 2000,
         "minimum": 0,
         "maximum": 600000,
         "required": false,
@@ -33,7 +33,7 @@
       "ctforcolor": {
         "title": "Allow CT to be set for RGB lights",
         "type": "boolean",
-        "default": "true",
+        "default": true,
         "required": false,
         "description": "color temperature setting combined with color setting enabled."
       },
@@ -58,7 +58,7 @@
         "default": 0,
         "minimum": 0,
         "maximum": 5000,
-        "description": "When changing in values, animate the change over given milliseconds. Use 0 for no a"
+        "description": "When changing values, animate the change over the given milliseconds. Use 0 for no animation."
       },
       "override": {
         "type": "array",
