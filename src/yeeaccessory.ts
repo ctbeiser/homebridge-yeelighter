@@ -78,11 +78,15 @@ export class YeeAccessory {
   private interval?: NodeJS.Timeout;
   private transactions = new Map<number, Deferred<void>>();
   private keepAlives = new Set<number>();
+  private lastCommandSignature?: string;
+  private lastCommandTimestamp = 0;
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
   private static readonly TRANSACTION_MAX_AGE_MS = 60_000;
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
+  private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
+  private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
   private floodAlarm?: number;
 
   public static instance(
@@ -323,11 +327,13 @@ export class YeeAccessory {
     }
     if (result && result.length === 1 && result[0] === "ok") {
       this.connected = true;
+      this.floodAlarm = undefined;
       this.debug(`received ${id}: OK`);
       transaction?.resolve();
       // simple ok
     } else if (result && result.length > 3) {
       this.connected = true;
+      this.floodAlarm = undefined;
       if (this.lastCommandId !== id) {
         this.debug(`received out-of-order update id ${id} while last command id is ${this.lastCommandId}`);
       }
@@ -368,11 +374,12 @@ export class YeeAccessory {
       if (errorMessage.includes("quota")) {
         this.warn(`quota exceeded for request [${id}]`);
         this.floodAlarm = Date.now();
-        // this.onDeviceDisconnected();
+        // Treat as soft failure to avoid cascading HomeKit "Updating" loops.
+        transaction?.resolve();
       } else {
         this.error(`Error returned for request [${id}]`, error);
+        transaction?.reject(error instanceof Error ? error : new Error(`device error for request [${id}]`));
       }
-      transaction?.reject(error instanceof Error ? error : new Error(`device error for request [${id}]`));
     } else {
       this.warn(`received unhandled ${id}:`, update);
       transaction?.resolve();
@@ -516,14 +523,51 @@ export class YeeAccessory {
   }
 
   private sendHeartbeat() {
+    if (this.isFloodRecoveryActive()) {
+      this.debug("skipping heartbeat while recovering from quota limit");
+      return;
+    }
     this.debug("sending heartbeat");
     this.heartbeatTimestamp = Date.now();
     const id = this.sendCommand("get_prop", this.device.info.trackedAttributes);
     this.keepAlives.add(id);
   }
 
+  private isFloodRecoveryActive(): boolean {
+    return !!this.floodAlarm && Date.now() - this.floodAlarm < this.getFloodRecoveryMs();
+  }
+
+  private getFloodRecoveryMs(): number {
+    const configured = Number(this.platform.config?.quotaRecoveryMs);
+    if (Number.isFinite(configured)) {
+      return Math.max(250, Math.min(configured, 5000));
+    }
+    return YeeAccessory.DEFAULT_FLOOD_RECOVERY_MS;
+  }
+
+  private isDuplicateCommand(method: string, parameters: Array<string | number | boolean>): boolean {
+    const signature = `${method}:${JSON.stringify(parameters)}`;
+    const now = Date.now();
+    const duplicate =
+      this.lastCommandSignature === signature &&
+      now - this.lastCommandTimestamp < YeeAccessory.DUPLICATE_COMMAND_WINDOW_MS;
+    this.lastCommandSignature = signature;
+    this.lastCommandTimestamp = now;
+    return duplicate;
+  }
+
   async sendCommandPromise(method: string, parameters: Array<string | number | boolean>): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (this.isFloodRecoveryActive()) {
+        this.debug(`skipping command "${method}" while recovering from quota limit`);
+        resolve();
+        return;
+      }
+      if (this.isDuplicateCommand(method, parameters)) {
+        this.debug(`skipping duplicate command "${method}"`, parameters);
+        resolve();
+        return;
+      }
       const timestamp = Date.now();
       const id = this.sendCommand(method, parameters);
       this.debug(`sent command ${id}: ${method}`, parameters);
@@ -550,9 +594,9 @@ export class YeeAccessory {
 
   private onInterval = () => {
     if (this.connected) {
-      // if flooded wait for 5 minutes
-      if (this.floodAlarm && Date.now() - this.floodAlarm < 300_000) {
-        this.log(`flooded. waiting ${(Date.now() - this.floodAlarm) / 60_000}s`);
+      if (this.isFloodRecoveryActive()) {
+        const elapsedMs = Date.now() - (this.floodAlarm || 0);
+        this.debug(`flooded. waiting ${(elapsedMs / 1000).toFixed(2)}s`);
       } else {
         this.floodAlarm = undefined;
         // seconds since last update
