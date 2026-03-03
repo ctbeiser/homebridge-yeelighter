@@ -288,7 +288,11 @@ export class LightService {
     this.light.setAttributes(attributes);
   }
 
-  protected handleCharacteristic(uuid: any, getter: () => Promise<any>, setter: (value: any) => void): Characteristic {
+  protected handleCharacteristic(
+    uuid: any,
+    getter: () => Promise<any>,
+    setter: (value: any) => void | Promise<void>
+  ): Characteristic {
     const characteristic = this.service.getCharacteristic(uuid);
     if (!characteristic) {
       throw new Error("Could not get Characteristic");
@@ -310,18 +314,15 @@ export class LightService {
         callback(error instanceof Error ? error : new Error("failed to get characteristic"));
       }
     });
-    characteristic.on("set", async (value, callback) => {
-      try {
-        if (this.light.connected && isValidValue(value)) {
-          await setter(value);
-          callback();
-        } else {
-          this.log(`failed to set to value`, value, this.light.connected);
-          callback(new Error("light disconnected or invalid value"));
-        }
-      } catch (error) {
-        this.warn("Characteristic set failed", uuid, value, error);
-        callback(error instanceof Error ? error : new Error("failed to set characteristic"));
+    characteristic.on("set", (value, callback) => {
+      if (this.light.connected && isValidValue(value)) {
+        callback();
+        void Promise.resolve(setter(value)).catch((error) => {
+          this.warn("Characteristic set failed", uuid, value, error);
+        });
+      } else {
+        this.log(`failed to set to value`, value, this.light.connected);
+        callback(new Error("light disconnected or invalid value"));
       }
     });
     return characteristic;
