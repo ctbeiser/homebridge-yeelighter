@@ -315,14 +315,18 @@ export class LightService {
       }
     });
     characteristic.on("set", (value, callback) => {
-      if (this.light.connected && isValidValue(value)) {
-        callback();
+      if (!isValidValue(value)) {
+        this.log(`failed to set to invalid value`, value);
+        callback(new Error("invalid value"));
+        return;
+      }
+      callback();
+      if (this.light.connected) {
         void Promise.resolve(setter(value)).catch((error) => {
           this.warn("Characteristic set failed", uuid, value, error);
         });
       } else {
-        this.log(`failed to set to value`, value, this.light.connected);
-        callback(new Error("light disconnected or invalid value"));
+        this.debug("Ignoring set while disconnected", uuid, value);
       }
     });
     return characteristic;
