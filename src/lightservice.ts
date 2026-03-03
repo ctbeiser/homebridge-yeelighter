@@ -322,12 +322,18 @@ export class LightService {
     });
     characteristic.on("set", async (value, callback) => {
       try {
-        if (this.light.connected && isValidValue(value)) {
+        if (!isValidValue(value)) {
+          callback(new Error("invalid value"));
+          return;
+        }
+        if (this.light.connected) {
           await setter(value);
           callback();
         } else {
-          this.log(`failed to set to value`, value, this.light.connected);
-          callback(new Error("light disconnected or invalid value"));
+          // HomeKit may write initial state before the socket is connected.
+          // Acknowledge to avoid long "Updating" spinners during startup.
+          this.debug("Ignoring set while disconnected", uuid, value);
+          callback();
         }
       } catch (error) {
         this.warn("Characteristic set failed", uuid, value, error);
