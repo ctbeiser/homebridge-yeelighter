@@ -315,7 +315,7 @@ export class YeeAccessory {
     const transaction = this.finalizeTransaction(id);
     const keepAlive = this.keepAlives.delete(id);
     if (!transaction && !keepAlive) {
-      this.warn(`no transactions found for ${id}`);
+      this.debug(`no transactions found for ${id}`);
     }
     if (transaction) {
       const seconds = (Date.now() - transaction.timestamp) / 1000;
@@ -328,13 +328,8 @@ export class YeeAccessory {
       // simple ok
     } else if (result && result.length > 3) {
       this.connected = true;
-      if (this.lastCommandId != id) {
-        if (id > this.lastCommandId) {
-          this.warn(`update with unexpected id: ${id}, expected: ${this.lastCommandId}`);
-          this.lastCommandId = id;
-        } else {
-          this.debug(`received out-of-order update id ${id} while last command id is ${this.lastCommandId}`);
-        }
+      if (this.lastCommandId !== id) {
+        this.debug(`received out-of-order update id ${id} while last command id is ${this.lastCommandId}`);
       }
 
       const seconds = (Date.now() - this.heartbeatTimestamp) / 1000;
@@ -447,7 +442,9 @@ export class YeeAccessory {
   }
 
   setNameService(service: Service) {
-    service.getCharacteristic(this.platform.Characteristic.ConfiguredName).on("set", (value, callback) => {
+    const configuredName = service.getCharacteristic(this.platform.Characteristic.ConfiguredName);
+    configuredName.removeAllListeners("set");
+    configuredName.on("set", (value, callback) => {
       this.log(`setting name to "${value}".`);
       service.displayName = value.toString();
       this.displayName = value.toString();

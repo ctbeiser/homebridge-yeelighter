@@ -203,7 +203,9 @@ export class LightService {
     }
 
     // name handling
-    this.service.getCharacteristic(this.platform.Characteristic.ConfiguredName).on("set", (value, callback) => {
+    const configuredName = this.service.getCharacteristic(this.platform.Characteristic.ConfiguredName);
+    configuredName.removeAllListeners("set");
+    configuredName.on("set", (value, callback) => {
       this.log("setConfiguredName", value);
       const name = value.toString();
       this.service.displayName = name;
@@ -297,6 +299,10 @@ export class LightService {
     if (!characteristic) {
       throw new Error("Could not get Characteristic");
     }
+    // Rebinding can happen when accessories/services are reconstructed from cache.
+    // Ensure we don't stack duplicate listeners for the same characteristic.
+    characteristic.removeAllListeners("get");
+    characteristic.removeAllListeners("set");
     characteristic.on("get", async (callback) => {
       try {
         if (this.light.connected) {
@@ -314,19 +320,18 @@ export class LightService {
         callback(error instanceof Error ? error : new Error("failed to get characteristic"));
       }
     });
-    characteristic.on("set", (value, callback) => {
-      if (!isValidValue(value)) {
-        this.log(`failed to set to invalid value`, value);
-        callback(new Error("invalid value"));
-        return;
-      }
-      callback();
-      if (this.light.connected) {
-        void Promise.resolve(setter(value)).catch((error) => {
-          this.warn("Characteristic set failed", uuid, value, error);
-        });
-      } else {
-        this.debug("Ignoring set while disconnected", uuid, value);
+    characteristic.on("set", async (value, callback) => {
+      try {
+        if (this.light.connected && isValidValue(value)) {
+          await setter(value);
+          callback();
+        } else {
+          this.log(`failed to set to value`, value, this.light.connected);
+          callback(new Error("light disconnected or invalid value"));
+        }
+      } catch (error) {
+        this.warn("Characteristic set failed", uuid, value, error);
+        callback(error instanceof Error ? error : new Error("failed to set characteristic"));
       }
     });
     return characteristic;
