@@ -80,6 +80,7 @@ export class YeeAccessory {
   private keepAlives = new Set<number>();
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
+  private lastSetCommandTimestamp = 0;
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
@@ -361,8 +362,16 @@ export class YeeAccessory {
         }
       }
 
+      // Determine when this get_prop was initiated. If a set command was sent
+      // *after* the query, the response likely contains pre-command (stale)
+      // state that would incorrectly revert HomeKit characteristics.
+      const querySentAt = keepAlive ? this.heartbeatTimestamp : (transaction?.timestamp ?? 0);
+      if (this.lastSetCommandTimestamp > querySentAt) {
+        this.debug("suppressing stale get_prop response (set command sent after query)");
+      } else {
+        this.onUpdateAttributes(newAttributes);
+      }
       this.lastFetchTime = Date.now();
-      this.onUpdateAttributes(newAttributes);
       transaction?.resolve();
     } else if (error) {
       let errorMessage = "";
@@ -569,6 +578,9 @@ export class YeeAccessory {
         return;
       }
       const timestamp = Date.now();
+      if (method !== "get_prop") {
+        this.lastSetCommandTimestamp = timestamp;
+      }
       const id = this.sendCommand(method, parameters);
       this.debug(`sent command ${id}: ${method}`, parameters);
       const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);

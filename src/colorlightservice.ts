@@ -22,9 +22,10 @@ export class ColorLightService extends LightService implements ConcreteLightServ
     this.handleCharacteristic(
       this.platform.Characteristic.On,
       async () => this.getAttribute("power"),
-      (value) => {
+      async (value) => {
         this.cancelAllDebounces();
-        return this.sendCommand("set_power", [value ? "on" : "off", "smooth", 500, 0]);
+        await this.sendCommand("set_power", [value ? "on" : "off", "smooth", 500, 0]);
+        this.setAttributes({ power: value });
       }
     );
     this.handleCharacteristic(
