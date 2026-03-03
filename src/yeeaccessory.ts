@@ -82,6 +82,7 @@ export class YeeAccessory {
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
   private static readonly TRANSACTION_MAX_AGE_MS = 60_000;
+  private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private floodAlarm?: number;
 
   public static instance(
@@ -328,8 +329,12 @@ export class YeeAccessory {
     } else if (result && result.length > 3) {
       this.connected = true;
       if (this.lastCommandId != id) {
-        this.warn(`update with unexpected id: ${id}, expected: ${this.lastCommandId}`);
-        this.lastCommandId = id;
+        if (id > this.lastCommandId) {
+          this.warn(`update with unexpected id: ${id}, expected: ${this.lastCommandId}`);
+          this.lastCommandId = id;
+        } else {
+          this.debug(`received out-of-order update id ${id} while last command id is ${this.lastCommandId}`);
+        }
       }
 
       const seconds = (Date.now() - this.heartbeatTimestamp) / 1000;
@@ -359,14 +364,20 @@ export class YeeAccessory {
       this.onUpdateAttributes(newAttributes);
       transaction?.resolve();
     } else if (error) {
-      if (error.message.includes("quota")) {
+      let errorMessage = "";
+      if (typeof error?.message === "string") {
+        errorMessage = error.message;
+      } else if (typeof error === "string") {
+        errorMessage = error;
+      }
+      if (errorMessage.includes("quota")) {
         this.warn(`quota exceeded for request [${id}]`);
         this.floodAlarm = Date.now();
         // this.onDeviceDisconnected();
       } else {
         this.error(`Error returned for request [${id}]`, error);
       }
-      transaction?.reject(error);
+      transaction?.reject(error instanceof Error ? error : new Error(`device error for request [${id}]`));
     } else {
       this.warn(`received unhandled ${id}:`, update);
       transaction?.resolve();
@@ -491,7 +502,16 @@ export class YeeAccessory {
     if (supportedCommands.length > 0 && !supportedCommands.includes(method)) {
       this.warn(`sending ${method} although unsupported.`);
     }
-    const id = this.lastCommandId + 1;
+    let id = this.lastCommandId + 1;
+    if (id > YeeAccessory.COMMAND_ID_MAX) {
+      id = 1;
+    }
+    while (this.transactions.has(id) || this.keepAlives.has(id)) {
+      id += 1;
+      if (id > YeeAccessory.COMMAND_ID_MAX) {
+        id = 1;
+      }
+    }
     this.debug(`sendCommand(${id}, ${method})`, parameters);
     this.device.sendCommand({ id, method, params: parameters });
     this.lastCommandId = id;
