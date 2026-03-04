@@ -48,6 +48,7 @@ interface Deferred<T> {
 interface QueuedCommand {
   method: string;
   parameters: Array<string | number | boolean>;
+  updatedAt: number;
   subscribers: Array<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -659,7 +660,14 @@ export class YeeAccessory {
       return;
     }
 
-    const command = this.commandQueue.shift();
+    let selectedIndex = 0;
+    for (let index = 1; index < this.commandQueue.length; index++) {
+      if (this.commandQueue[index].updatedAt > this.commandQueue[selectedIndex].updatedAt) {
+        selectedIndex = index;
+      }
+    }
+
+    const command = this.commandQueue.splice(selectedIndex, 1)[0];
     if (!command) {
       return;
     }
@@ -744,12 +752,17 @@ export class YeeAccessory {
         this.commandQueue.push({
           method,
           parameters,
+          updatedAt: Date.now(),
           subscribers: [{ resolve, reject }]
         });
       } else {
         const existing = this.commandQueue[existingIndex];
+        for (const subscriber of existing.subscribers) {
+          subscriber.resolve();
+        }
         existing.parameters = parameters;
-        existing.subscribers.push({ resolve, reject });
+        existing.updatedAt = Date.now();
+        existing.subscribers = [{ resolve, reject }];
       }
       this.processCommandQueue();
     });
