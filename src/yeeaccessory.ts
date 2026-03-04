@@ -362,12 +362,14 @@ export class YeeAccessory {
         }
       }
 
-      // Determine when this get_prop was initiated. If a set command was sent
-      // *after* the query, the response likely contains pre-command (stale)
-      // state that would incorrectly revert HomeKit characteristics.
-      const querySentAt = keepAlive ? this.heartbeatTimestamp : (transaction?.timestamp ?? 0);
-      if (this.lastSetCommandTimestamp > querySentAt) {
-        this.debug("suppressing stale get_prop response (set command sent after query)");
+      // After a set command the device may take a moment to apply the new
+      // state. Any get_prop response that arrives in that window — whether the
+      // query was sent before OR after the set — can still carry stale values
+      // that would incorrectly revert HomeKit characteristics. Suppress all
+      // attribute updates for a short grace period after the last set command.
+      const SET_GRACE_MS = 1500;
+      if (Date.now() - this.lastSetCommandTimestamp < SET_GRACE_MS) {
+        this.debug("suppressing get_prop response during set-command grace period");
       } else {
         this.onUpdateAttributes(newAttributes);
       }
