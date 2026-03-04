@@ -99,7 +99,7 @@ export class YeeAccessory {
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
   private static readonly RATE_LIMIT_INTERVAL_MS = 60_000 / 59; // ≈1017ms between commands for 59/min
-  private static readonly RATE_LIMIT_BURST = 1;
+  private static readonly RATE_LIMIT_BURST = 5;
   private floodAlarm?: number;
 
   public static instance(
