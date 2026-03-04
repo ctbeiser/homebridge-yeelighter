@@ -82,7 +82,13 @@ export class YeeAccessory {
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
   private commandTimestamps: number[] = [];
-  private rateLimitQueue: Promise<void> = Promise.resolve();
+  private commandQueue: Array<{
+    method: string;
+    parameters: Array<string | number | boolean>;
+    resolve: (value: void) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private draining = false;
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
@@ -611,16 +617,35 @@ export class YeeAccessory {
     return 0;
   }
 
-  private enqueueRateLimit(): Promise<void> {
-    const delay = this.getRateLimitDelay();
-    if (delay > 0) {
-      this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${delay}ms`);
-      this.rateLimitQueue = this.rateLimitQueue.then(
-        () => new Promise((resolve) => setTimeout(resolve, delay))
-      );
-      return this.rateLimitQueue;
+  private async drainQueue(): Promise<void> {
+    if (this.draining) {
+      return;
     }
-    return Promise.resolve();
+    this.draining = true;
+    try {
+      while (this.commandQueue.length > 0) {
+        const delay = this.getRateLimitDelay();
+        if (delay > 0) {
+          this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+        }
+        const entry = this.commandQueue.shift()!;
+        this.commandTimestamps.push(Date.now());
+        const timestamp = Date.now();
+        const id = this.sendCommand(entry.method, entry.parameters);
+        this.debug(`sent command ${id}: ${entry.method}`, entry.parameters);
+        const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
+        const timeout = setTimeout(() => {
+          const pending = this.finalizeTransaction(id);
+          if (pending) {
+            pending.reject(new Error(`timeout waiting for response to "${entry.method}"`));
+          }
+        }, timeoutMs);
+        this.transactions.set(id, { resolve: entry.resolve, reject: entry.reject, timestamp, timeout });
+      }
+    } finally {
+      this.draining = false;
+    }
   }
 
   async sendCommandPromise(method: string, parameters: Array<string | number | boolean>): Promise<void> {
@@ -632,20 +657,18 @@ export class YeeAccessory {
       this.debug(`skipping duplicate command "${method}"`, parameters);
       return;
     }
-    await this.enqueueRateLimit();
-    this.commandTimestamps.push(Date.now());
     return new Promise((resolve, reject) => {
-      const timestamp = Date.now();
-      const id = this.sendCommand(method, parameters);
-      this.debug(`sent command ${id}: ${method}`, parameters);
-      const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
-      const timeout = setTimeout(() => {
-        const pending = this.finalizeTransaction(id);
-        if (pending) {
-          pending.reject(new Error(`timeout waiting for response to "${method}"`));
-        }
-      }, timeoutMs);
-      this.transactions.set(id, { resolve, reject, timestamp, timeout });
+      // Coalesce: if a command with the same method is already queued, replace it
+      const existingIndex = this.commandQueue.findIndex((entry) => entry.method === method);
+      if (existingIndex !== -1) {
+        const old = this.commandQueue[existingIndex];
+        this.debug(`coalescing queued "${method}" command`, parameters);
+        old.resolve();
+        this.commandQueue[existingIndex] = { method, parameters, resolve, reject };
+      } else {
+        this.commandQueue.push({ method, parameters, resolve, reject });
+      }
+      this.drainQueue();
     });
   }
 
