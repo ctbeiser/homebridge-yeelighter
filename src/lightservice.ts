@@ -321,24 +321,30 @@ export class LightService {
       }
     });
     characteristic.on("set", async (value, callback) => {
-      try {
-        if (!isValidValue(value)) {
-          callback(new Error("invalid value"));
-          return;
-        }
-        if (this.light.connected) {
-          await setter(value);
-          callback();
-        } else {
-          // HomeKit may write initial state before the socket is connected.
-          // Acknowledge to avoid long "Updating" spinners during startup.
-          this.debug("Ignoring set while disconnected", uuid, value);
-          callback();
-        }
-      } catch (error) {
-        this.warn("Characteristic set failed", uuid, value, error);
-        callback(error instanceof Error ? error : new Error("failed to set characteristic"));
+      if (!isValidValue(value)) {
+        callback(new Error("invalid value"));
+        return;
       }
+      if (!this.light.connected) {
+        // HomeKit may write initial state before the socket is connected.
+        // Acknowledge to avoid long "Updating" spinners during startup.
+        this.debug("Ignoring set while disconnected", uuid, value);
+        callback();
+        return;
+      }
+
+      // Acknowledge immediately so HomeKit doesn't serialize a backlog of stale
+      // slider writes behind command pacing / network delays.
+      callback();
+
+      void (async () => {
+        try {
+          await setter(value);
+        } catch (error) {
+          // Do not throw after callback() was already sent.
+          this.warn("Characteristic set failed", uuid, value, error);
+        }
+      })();
     });
     return characteristic;
   }

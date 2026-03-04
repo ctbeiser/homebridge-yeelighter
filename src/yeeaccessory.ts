@@ -49,6 +49,7 @@ interface QueuedCommand {
   method: string;
   parameters: Array<string | number | boolean>;
   updatedAt: number;
+  awaitResponse: boolean;
   subscribers: Array<{
     resolve: () => void;
     reject: (error: Error) => void;
@@ -347,13 +348,11 @@ export class YeeAccessory {
     }
     if (result && result.length === 1 && result[0] === "ok") {
       this.connected = true;
-      this.floodAlarm = undefined;
       this.debug(`received ${id}: OK`);
       transaction?.resolve();
       // simple ok
     } else if (result && result.length > 3) {
       this.connected = true;
-      this.floodAlarm = undefined;
       if (this.lastCommandId !== id) {
         this.debug(`received out-of-order update id ${id} while last command id is ${this.lastCommandId}`);
       }
@@ -394,6 +393,7 @@ export class YeeAccessory {
       if (errorMessage.includes("quota")) {
         this.warn(`quota exceeded for request [${id}]`);
         this.floodAlarm = Date.now();
+        this.resolveQueuedCommandsWithoutSending("Clearing queued commands after quota limit");
         // Treat as soft failure to avoid cascading HomeKit "Updating" loops.
         transaction?.resolve();
       } else {
@@ -618,6 +618,18 @@ export class YeeAccessory {
     return Math.max(0, lastSent + spacingMs - now);
   }
 
+  private getQuotaWindowRecoveryMs(now = Date.now()): number {
+    this.pruneRecentCommandTimestamps(now);
+    if (this.recentCommandTimestamps.length < YeeAccessory.COMMAND_QUOTA_MAX_EVENTS) {
+      return 0;
+    }
+    const oldest = this.recentCommandTimestamps[0];
+    if (oldest === undefined) {
+      return 0;
+    }
+    return Math.max(0, oldest + YeeAccessory.COMMAND_QUOTA_WINDOW_MS - now);
+  }
+
   private scheduleCommandQueueProcessing(delayMs: number): void {
     if (this.commandQueueTimer) {
       return;
@@ -660,11 +672,11 @@ export class YeeAccessory {
       return;
     }
 
-    let selectedIndex = 0;
-    for (let index = 1; index < this.commandQueue.length; index++) {
-      if (this.commandQueue[index].updatedAt > this.commandQueue[selectedIndex].updatedAt) {
-        selectedIndex = index;
-      }
+    // Always prioritize writes over get_prop reads to keep control latency low.
+    // Within each class, preserve arrival order.
+    let selectedIndex = this.commandQueue.findIndex((item) => !item.awaitResponse);
+    if (selectedIndex === -1) {
+      selectedIndex = 0;
     }
 
     const command = this.commandQueue.splice(selectedIndex, 1)[0];
@@ -672,31 +684,37 @@ export class YeeAccessory {
       return;
     }
 
-    const { method, parameters, subscribers } = command;
+    const { method, parameters, subscribers, awaitResponse } = command;
     const timestamp = Date.now();
     const id = this.sendCommand(method, parameters);
     this.debug(`sent command ${id}: ${method}`, parameters);
-    const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
-    const timeout = setTimeout(() => {
-      const pending = this.finalizeTransaction(id);
-      if (pending) {
-        pending.reject(new Error(`timeout waiting for response to "${method}"`));
+    if (awaitResponse) {
+      const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
+      const timeout = setTimeout(() => {
+        const pending = this.finalizeTransaction(id);
+        if (pending) {
+          pending.reject(new Error(`timeout waiting for response to "${method}"`));
+        }
+      }, timeoutMs);
+      this.transactions.set(id, {
+        resolve: () => {
+          for (const subscriber of subscribers) {
+            subscriber.resolve();
+          }
+        },
+        reject: (error: Error) => {
+          for (const subscriber of subscribers) {
+            subscriber.reject(error);
+          }
+        },
+        timestamp,
+        timeout
+      });
+    } else {
+      for (const subscriber of subscribers) {
+        subscriber.resolve();
       }
-    }, timeoutMs);
-    this.transactions.set(id, {
-      resolve: () => {
-        for (const subscriber of subscribers) {
-          subscriber.resolve();
-        }
-      },
-      reject: (error: Error) => {
-        for (const subscriber of subscribers) {
-          subscriber.reject(error);
-        }
-      },
-      timestamp,
-      timeout
-    });
+    }
 
     this.processCommandQueue();
   }
@@ -708,8 +726,9 @@ export class YeeAccessory {
     }
     this.debug("sending heartbeat");
     this.heartbeatTimestamp = Date.now();
-    const id = this.sendCommand("get_prop", this.device.info.trackedAttributes);
-    this.keepAlives.add(id);
+    void this.sendCommandPromise("get_prop", this.device.info.trackedAttributes).catch(() => {
+      // keep heartbeat fire-and-forget to avoid blocking interval loop
+    });
   }
 
   private isFloodRecoveryActive(): boolean {
@@ -718,10 +737,9 @@ export class YeeAccessory {
 
   private getFloodRecoveryMs(): number {
     const configured = Number(this.platform.config?.quotaRecoveryMs);
-    if (Number.isFinite(configured)) {
-      return Math.max(250, Math.min(configured, 5000));
-    }
-    return YeeAccessory.DEFAULT_FLOOD_RECOVERY_MS;
+    const configuredMs = Number.isFinite(configured) ? Math.max(250, Math.min(configured, 5000)) : 0;
+    const quotaWindowMs = this.getQuotaWindowRecoveryMs();
+    return Math.max(configuredMs || YeeAccessory.DEFAULT_FLOOD_RECOVERY_MS, quotaWindowMs);
   }
 
   private isDuplicateCommand(method: string, parameters: Array<string | number | boolean>): boolean {
@@ -737,6 +755,7 @@ export class YeeAccessory {
 
   async sendCommandPromise(method: string, parameters: Array<string | number | boolean>): Promise<void> {
     return new Promise((resolve, reject) => {
+      const awaitResponse = method === "get_prop";
       if (this.isFloodRecoveryActive()) {
         this.debug(`skipping command "${method}" while recovering from quota limit`);
         resolve();
@@ -753,18 +772,26 @@ export class YeeAccessory {
           method,
           parameters,
           updatedAt: Date.now(),
-          subscribers: [{ resolve, reject }]
+          awaitResponse,
+          subscribers: awaitResponse ? [{ resolve, reject }] : []
         });
       } else {
         const existing = this.commandQueue[existingIndex];
-        for (const subscriber of existing.subscribers) {
-          subscriber.resolve();
+        if (existing.awaitResponse) {
+          existing.subscribers.push({ resolve, reject });
+        } else {
+          existing.parameters = parameters;
+          existing.updatedAt = Date.now();
+          for (const subscriber of existing.subscribers) {
+            subscriber.resolve();
+          }
+          existing.subscribers = [];
         }
-        existing.parameters = parameters;
-        existing.updatedAt = Date.now();
-        existing.subscribers = [{ resolve, reject }];
       }
       this.processCommandQueue();
+      if (!awaitResponse) {
+        resolve();
+      }
     });
   }
 
@@ -784,7 +811,10 @@ export class YeeAccessory {
         const elapsedMs = Date.now() - (this.floodAlarm || 0);
         this.debug(`flooded. waiting ${(elapsedMs / 1000).toFixed(2)}s`);
       } else {
-        this.floodAlarm = undefined;
+        if (this.floodAlarm) {
+          this.debug("quota recovery window elapsed");
+          this.floodAlarm = undefined;
+        }
         // seconds since last update
         const updateSince = (Date.now() - this.updateTimestamp) / 1000;
         const updateThreshold =
