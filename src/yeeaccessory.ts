@@ -322,9 +322,8 @@ export class YeeAccessory {
   };
 
   public getAttributesFast = (): Attributes => {
-    if (this.shouldRefreshAttributes() && !this.fetchInProgress) {
-      void this.startAttributeFetch();
-    }
+    // Fast path should remain read-only and never trigger network I/O.
+    // This avoids get_prop contention with write bursts.
     return this.attributes;
   };
 
