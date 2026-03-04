@@ -61,7 +61,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
         this.powerMode = mode;
       }
       delete this.timer;
-    }, 500);
+    }, 200);
   }
 
   protected async sendDebouncedPowerOverride(mode?: number) {
