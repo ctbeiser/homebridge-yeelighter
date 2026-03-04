@@ -80,7 +80,7 @@ export class YeeAccessory {
   private keepAlives = new Set<number>();
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
-  private lastSetCommandTimestamp = 0;
+  private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
@@ -282,6 +282,9 @@ export class YeeAccessory {
 
   public setAttributes(attributes: Partial<Attributes>) {
     this.attributes = { ...this.attributes, ...attributes };
+    for (const [key, value] of Object.entries(attributes)) {
+      this.pendingSetValues.set(key, { value, misses: 0 });
+    }
   }
 
   private static areAttributesEqual(left: Attributes, right: Attributes): boolean {
@@ -362,17 +365,7 @@ export class YeeAccessory {
         }
       }
 
-      // After a set command the device may take a moment to apply the new
-      // state. Any get_prop response that arrives in that window — whether the
-      // query was sent before OR after the set — can still carry stale values
-      // that would incorrectly revert HomeKit characteristics. Suppress all
-      // attribute updates for a short grace period after the last set command.
-      const SET_GRACE_MS = 1500;
-      if (Date.now() - this.lastSetCommandTimestamp < SET_GRACE_MS) {
-        this.debug("suppressing get_prop response during set-command grace period");
-      } else {
-        this.onUpdateAttributes(newAttributes);
-      }
+      this.onUpdateAttributes(newAttributes);
       this.lastFetchTime = Date.now();
       transaction?.resolve();
     } else if (error) {
@@ -398,13 +391,36 @@ export class YeeAccessory {
   };
 
   private onUpdateAttributes = (newAttributes: Attributes) => {
-    if (!YeeAccessory.areAttributesEqual(this.attributes, newAttributes)) {
-      if (!this.config?.blocking) {
-        for (const service of this.services) {
-          service.onAttributesUpdated(newAttributes);
+    // Reconcile device-reported attributes with optimistic values from recent
+    // set commands.  The device may not have applied our command yet, so we
+    // overlay pending values until the device confirms them.
+    const reconciled = { ...newAttributes };
+    for (const [key, pending] of this.pendingSetValues) {
+      if (newAttributes[key] === pending.value) {
+        // Device now reports the value we set — confirmed.
+        this.pendingSetValues.delete(key);
+      } else {
+        // Device still reports a different value.
+        pending.misses++;
+        if (pending.misses > 2) {
+          // Two full poll cycles without confirmation — the device genuinely
+          // disagrees (command may have failed).  Trust the device.
+          this.debug(`pending "${key}" not confirmed after ${pending.misses} polls, clearing`);
+          this.pendingSetValues.delete(key);
+        } else {
+          // Overlay our optimistic value so HomeKit doesn't flicker.
+          reconciled[key] = pending.value;
         }
       }
-      this.attributes = { ...newAttributes };
+    }
+
+    if (!YeeAccessory.areAttributesEqual(this.attributes, reconciled)) {
+      if (!this.config?.blocking) {
+        for (const service of this.services) {
+          service.onAttributesUpdated(reconciled);
+        }
+      }
+      this.attributes = { ...reconciled };
     }
   };
 
@@ -580,9 +596,6 @@ export class YeeAccessory {
         return;
       }
       const timestamp = Date.now();
-      if (method !== "get_prop") {
-        this.lastSetCommandTimestamp = timestamp;
-      }
       const id = this.sendCommand(method, parameters);
       this.debug(`sent command ${id}: ${method}`, parameters);
       const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
