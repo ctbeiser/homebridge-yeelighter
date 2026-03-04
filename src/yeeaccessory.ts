@@ -606,18 +606,29 @@ export class YeeAccessory {
 
   private getRateLimitDelay(): number {
     this.pruneCommandTimestamps();
+    const now = Date.now();
     const n = this.commandTimestamps.length;
     const MAX = YeeAccessory.RATE_LIMIT_MAX;
     const WINDOW = YeeAccessory.RATE_LIMIT_WINDOW_MS;
 
-    // Smooth ramp: delay grows linearly with window utilization.
-    // d(n) = n * WINDOW / MAX² satisfies the steady-state equation
-    // n * d(n) = WINDOW at n = MAX, giving exactly MAX commands/minute.
-    const smooth = n * WINDOW / (MAX * MAX);
+    // Weighted pressure: each command's contribution is proportional to
+    // how long it still occupies the window (1.0 when just sent, 0.0 when
+    // about to age out).  This makes the delay sensitive to WHEN commands
+    // were sent, not just how many: 58 commands about to expire exert far
+    // less pressure than 58 commands just sent.
+    let W = 0;
+    for (const ts of this.commandTimestamps) {
+      W += (ts + WINDOW - now) / WINDOW;
+    }
 
-    // Hard cap: if at the limit, wait for the oldest to age out.
+    // d(W) = W * 2 * WINDOW / MAX².  At steady state the commands are
+    // uniformly distributed, so average weight = 0.5, W = MAX/2, and
+    // d = WINDOW/MAX ≈ 1017 ms → exactly MAX commands per minute.
+    const smooth = W * 2 * WINDOW / (MAX * MAX);
+
+    // Hard cap: never exceed MAX commands in the window.
     const hard = n >= MAX
-      ? Math.max(0, this.commandTimestamps[0] + WINDOW - Date.now())
+      ? Math.max(0, this.commandTimestamps[0] + WINDOW - now)
       : 0;
 
     const spacing = Math.max(smooth, hard);
@@ -625,7 +636,7 @@ export class YeeAccessory {
     // Credit time already elapsed since the last send, so idle time
     // counts toward the spacing and the first command after idle is instant.
     const elapsed = this.lastSendTimestamp > 0
-      ? Date.now() - this.lastSendTimestamp
+      ? now - this.lastSendTimestamp
       : spacing;
     return Math.max(0, Math.ceil(spacing - elapsed));
   }
