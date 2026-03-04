@@ -600,13 +600,19 @@ export class YeeAccessory {
       return baseDebounceMs;
     }
 
-    const msUntilHeadroom = this.getRequiredExpiryDelayMs(YeeAccessory.COMMAND_QUOTA_TARGET_EVENTS, now);
+    const oldest = this.recentCommandTimestamps[0];
+    if (oldest === undefined) {
+      return baseDebounceMs;
+    }
+
+    const msUntilWindowReset = Math.max(0, oldest + YeeAccessory.COMMAND_QUOTA_WINDOW_MS - now);
     const headroom = YeeAccessory.COMMAND_QUOTA_TARGET_EVENTS - count;
     if (headroom <= 0) {
+      const msUntilHeadroom = this.getRequiredExpiryDelayMs(YeeAccessory.COMMAND_QUOTA_TARGET_EVENTS, now);
       return Math.max(baseDebounceMs, msUntilHeadroom);
     }
 
-    const pacingMs = Math.ceil(msUntilHeadroom / headroom);
+    const pacingMs = Math.ceil(msUntilWindowReset / headroom);
     return Math.max(baseDebounceMs, pacingMs);
   }
 

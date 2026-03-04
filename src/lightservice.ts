@@ -303,6 +303,9 @@ export class LightService {
     // Ensure we don't stack duplicate listeners for the same characteristic.
     characteristic.removeAllListeners("get");
     characteristic.removeAllListeners("set");
+    let setLoopRunning = false;
+    let queuedSetValue: unknown;
+    let hasQueuedSetValue = false;
     characteristic.on("get", async (callback) => {
       try {
         if (this.light.connected) {
@@ -320,7 +323,7 @@ export class LightService {
         callback(error instanceof Error ? error : new Error("failed to get characteristic"));
       }
     });
-    characteristic.on("set", async (value, callback) => {
+    characteristic.on("set", (value, callback) => {
       if (!isValidValue(value)) {
         callback(new Error("invalid value"));
         return;
@@ -337,13 +340,28 @@ export class LightService {
       // slider writes behind command pacing / network delays.
       callback();
 
+      // Collapse bursts to latest value per characteristic while a setter is in
+      // flight. This avoids replaying stale slider positions.
+      queuedSetValue = value;
+      hasQueuedSetValue = true;
+      if (setLoopRunning) {
+        return;
+      }
+
+      setLoopRunning = true;
+
       void (async () => {
-        try {
-          await setter(value);
-        } catch (error) {
-          // Do not throw after callback() was already sent.
-          this.warn("Characteristic set failed", uuid, value, error);
+        while (hasQueuedSetValue) {
+          const nextValue = queuedSetValue;
+          hasQueuedSetValue = false;
+          try {
+            await setter(nextValue);
+          } catch (error) {
+            // Do not throw after callback() was already sent.
+            this.warn("Characteristic set failed", uuid, nextValue, error);
+          }
         }
+        setLoopRunning = false;
       })();
     });
     return characteristic;
