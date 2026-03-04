@@ -56,6 +56,13 @@ interface QueuedCommand {
   }>;
 }
 
+class CommandSkippedError extends Error {
+  constructor(public readonly reason: string, public readonly method: string) {
+    super(`${reason}: ${method}`);
+    this.name = "CommandSkippedError";
+  }
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, timeoutError = new Error("__timeout__")): Promise<T> {
   // create a promise that rejects in milliseconds
   const timeout = new Promise<never>((_resolve, reject) => {
@@ -395,8 +402,7 @@ export class YeeAccessory {
         this.warn(`quota exceeded for request [${id}]`);
         this.floodAlarm = Date.now();
         this.resolveQueuedCommandsWithoutSending("Clearing queued commands after quota limit");
-        // Treat as soft failure to avoid cascading HomeKit "Updating" loops.
-        transaction?.resolve();
+        transaction?.reject(new CommandSkippedError("quota exceeded", "device response"));
       } else {
         this.error(`Error returned for request [${id}]`, error);
         transaction?.reject(error instanceof Error ? error : new Error(`device error for request [${id}]`));
@@ -655,7 +661,7 @@ export class YeeAccessory {
     const queued = this.commandQueue.splice(0, this.commandQueue.length);
     for (const command of queued) {
       for (const subscriber of command.subscribers) {
-        subscriber.resolve();
+        subscriber.reject(new CommandSkippedError(reason, command.method));
       }
     }
   }
@@ -760,8 +766,7 @@ export class YeeAccessory {
     return new Promise((resolve, reject) => {
       const awaitResponse = method === "get_prop";
       if (this.isFloodRecoveryActive()) {
-        this.debug(`skipping command "${method}" while recovering from quota limit`);
-        resolve();
+        reject(new CommandSkippedError("quota recovery active", method));
         return;
       }
       if (this.isDuplicateCommand(method, parameters)) {
