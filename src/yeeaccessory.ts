@@ -81,8 +81,8 @@ export class YeeAccessory {
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
-  private rateLimitTokens = YeeAccessory.RATE_LIMIT_BURST;
-  private rateLimitLastRefill = 0;
+  private commandTimestamps: number[] = [];
+  private lastSendTimestamp = 0;
   private commandQueue: Array<{
     method: string;
     parameters: Array<string | number | boolean>;
@@ -98,8 +98,8 @@ export class YeeAccessory {
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
-  private static readonly RATE_LIMIT_INTERVAL_MS = 60_000 / 59; // ≈1017ms between commands for 59/min
-  private static readonly RATE_LIMIT_BURST = 5;
+  private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
+  private static readonly RATE_LIMIT_MAX = 59;
   private floodAlarm?: number;
 
   public static instance(
@@ -566,7 +566,8 @@ export class YeeAccessory {
       this.debug("skipping heartbeat while recovering from quota limit");
       return;
     }
-    this.consumeRateLimitToken();
+    this.commandTimestamps.push(Date.now());
+    this.lastSendTimestamp = Date.now();
     this.debug("sending heartbeat");
     this.heartbeatTimestamp = Date.now();
     const id = this.sendCommand("get_prop", this.device.info.trackedAttributes);
@@ -596,29 +597,37 @@ export class YeeAccessory {
     return duplicate;
   }
 
-  private refillRateLimitTokens() {
-    const now = Date.now();
-    if (this.rateLimitLastRefill > 0) {
-      const elapsed = now - this.rateLimitLastRefill;
-      this.rateLimitTokens = Math.min(
-        YeeAccessory.RATE_LIMIT_BURST,
-        this.rateLimitTokens + elapsed / YeeAccessory.RATE_LIMIT_INTERVAL_MS,
-      );
+  private pruneCommandTimestamps() {
+    const cutoff = Date.now() - YeeAccessory.RATE_LIMIT_WINDOW_MS;
+    while (this.commandTimestamps.length > 0 && this.commandTimestamps[0] <= cutoff) {
+      this.commandTimestamps.shift();
     }
-    this.rateLimitLastRefill = now;
-  }
-
-  private consumeRateLimitToken() {
-    this.refillRateLimitTokens();
-    this.rateLimitTokens -= 1;
   }
 
   private getRateLimitDelay(): number {
-    this.refillRateLimitTokens();
-    if (this.rateLimitTokens >= 1) {
-      return 0;
-    }
-    return Math.ceil((1 - this.rateLimitTokens) * YeeAccessory.RATE_LIMIT_INTERVAL_MS);
+    this.pruneCommandTimestamps();
+    const n = this.commandTimestamps.length;
+    const MAX = YeeAccessory.RATE_LIMIT_MAX;
+    const WINDOW = YeeAccessory.RATE_LIMIT_WINDOW_MS;
+
+    // Smooth ramp: delay grows linearly with window utilization.
+    // d(n) = n * WINDOW / MAX² satisfies the steady-state equation
+    // n * d(n) = WINDOW at n = MAX, giving exactly MAX commands/minute.
+    const smooth = n * WINDOW / (MAX * MAX);
+
+    // Hard cap: if at the limit, wait for the oldest to age out.
+    const hard = n >= MAX
+      ? Math.max(0, this.commandTimestamps[0] + WINDOW - Date.now())
+      : 0;
+
+    const spacing = Math.max(smooth, hard);
+
+    // Credit time already elapsed since the last send, so idle time
+    // counts toward the spacing and the first command after idle is instant.
+    const elapsed = this.lastSendTimestamp > 0
+      ? Date.now() - this.lastSendTimestamp
+      : spacing;
+    return Math.max(0, Math.ceil(spacing - elapsed));
   }
 
   private async drainQueue(): Promise<void> {
@@ -630,12 +639,14 @@ export class YeeAccessory {
       while (this.commandQueue.length > 0) {
         const delay = this.getRateLimitDelay();
         if (delay > 0) {
-          this.debug(`rate limit: waiting ${delay}ms (tokens: ${this.rateLimitTokens.toFixed(2)})`);
+          this.debug(`rate limit: ${this.commandTimestamps.length} in window, waiting ${delay}ms`);
           await new Promise((r) => setTimeout(r, delay));
         }
         const entry = this.commandQueue.shift()!;
-        this.consumeRateLimitToken();
-        const timestamp = Date.now();
+        const now = Date.now();
+        this.commandTimestamps.push(now);
+        this.lastSendTimestamp = now;
+        const timestamp = now;
         const id = this.sendCommand(entry.method, entry.parameters);
         this.debug(`sent command ${id}: ${entry.method}`, entry.parameters);
         const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
