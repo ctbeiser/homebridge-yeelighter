@@ -24,7 +24,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
   }
 
   private getBrightness(attributes): number {
-    if (this.specs.nightLight) {
+    if (this.specs.nightLight && false) {
       const { bright, nl_br, active_mode } = attributes;
       const br1 = Number(bright);
       const br2 = Number(nl_br);
@@ -79,14 +79,25 @@ export class TemperatureLightService extends LightService implements ConcreteLig
         if (value > 0) {
           const attributes = await this.attributes();
           const desiredMode =
+<<<<<<< Updated upstream
             this.specs.nightLight && value < 50 ? POWERMODE_MOON : POWERMODE_CT;
 
           if (!attributes.power || (this.specs.nightLight && this.powerMode !== desiredMode)) {
             await this.sendPower(desiredMode);
+=======
+            this.specs.nightLight && false && value < 50 ? POWERMODE_MOON : POWERMODE_CT;
+          const powerWasPending = Boolean(this.timer);
+          const wasOff = !attributes.power;
+
+          if (powerWasPending || wasOff) {
+            await this.sendDebouncedPowerOverride(desiredMode);
+          } else if (this.specs.nightLight && false && this.powerMode !== desiredMode) {
+            await this.sendDebouncedPowerOverride(desiredMode);
+>>>>>>> Stashed changes
           }
 
           let valueToSet = value;
-          if (this.specs.nightLight) {
+          if (this.specs.nightLight && false) {
             if (value < 50) {
               valueToSet = value * 2 - 1;
             } else {
