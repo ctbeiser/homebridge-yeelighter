@@ -84,21 +84,13 @@ export class TemperatureLightService extends LightService implements ConcreteLig
           if (!attributes.power || (this.specs.nightLight && this.powerMode !== desiredMode)) {
             await this.sendPower(desiredMode);
           }
-
-          let valueToSet = value;
-          if (this.specs.nightLight) {
-            if (value < 50) {
-              valueToSet = value * 2 - 1;
-            } else {
-              valueToSet = Math.max(1, (value - 50) * 2);
-            }
-          }
-          this.log(`set brightness ${value} (translated to ${valueToSet})`);
-          await this.sendAnimatedCommand("set_bright", valueToSet);
+          
+          this.log(`set brightness ${value} (translated to ${value})`);
+          await this.sendAnimatedCommand("set_bright", value);
           if (value < 50) {
-            this.setAttributes({ nl_br: valueToSet });
+            this.setAttributes({ nl_br: value });
           } else {
-            this.setAttributes({ bright: valueToSet });
+            this.setAttributes({ bright: value });
           }
         } else {
           this.log(`set brightness to 0, power off`);
