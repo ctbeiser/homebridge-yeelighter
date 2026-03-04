@@ -658,13 +658,16 @@ export class YeeAccessory {
       return;
     }
     return new Promise((resolve, reject) => {
-      // Coalesce: if a command with the same method is already queued, replace it
-      const existingIndex = this.commandQueue.findIndex((entry) => entry.method === method);
-      if (existingIndex !== -1) {
-        const old = this.commandQueue[existingIndex];
+      // Coalesce: only replace the last entry if it has the same method.
+      // We must not replace an earlier entry because intervening commands
+      // of a different method may depend on the original ordering
+      // (e.g. set_power("on") followed by set_bright must not have the
+      // power command coalesced to "off" while bright stays after it).
+      const last = this.commandQueue.length > 0 ? this.commandQueue[this.commandQueue.length - 1] : undefined;
+      if (last && last.method === method) {
         this.debug(`coalescing queued "${method}" command`, parameters);
-        old.resolve();
-        this.commandQueue[existingIndex] = { method, parameters, resolve, reject };
+        last.resolve();
+        this.commandQueue[this.commandQueue.length - 1] = { method, parameters, resolve, reject };
       } else {
         this.commandQueue.push({ method, parameters, resolve, reject });
       }
