@@ -1,5 +1,4 @@
 import { PlatformAccessory, Service } from "homebridge";
-import { performance } from "node:perf_hooks";
 import { YeelighterPlatform } from "./platform";
 import { MODEL_SPECS, EMPTY_SPECS, Specs } from "./specs";
 import { Device, DeviceInfo } from "./yeedevice";
@@ -50,119 +49,9 @@ interface QueuedCommandPacket {
   id: number;
   method: string;
   parameters: Array<string | number | boolean>;
-  onSend?: (id: number) => void;
-}
-
-class WindowEnvelopeLimiter<T> {
-  private readonly sendTimes: number[] = [];
-  private readonly queue: T[] = [];
-  private timerArmed = false;
-  private lastSend = 0;
-  private readonly effectiveLimit: number;
-
-  constructor(
-    private readonly sendEvent: (batch: T[]) => void,
-    private readonly scheduleTimer: (absoluteTimeMs: number, callback: () => void) => void,
-    private readonly cancelTimer: () => void,
-    private readonly windowMs = 60_000,
-    private readonly limit = 60,
-    private readonly burstHeadroom = 10,
-    private readonly epsilonMs = 0.001,
-    private readonly nowMs: () => number = () => performance.now()
-  ) {
-    if (!(this.burstHeadroom >= 0 && this.burstHeadroom < this.limit)) {
-      throw new Error("burstHeadroom must satisfy 0 <= burstHeadroom < limit");
-    }
-    this.effectiveLimit = this.limit - this.burstHeadroom;
-    if (this.effectiveLimit <= 0) {
-      throw new Error("limit - burstHeadroom must be >= 1");
-    }
-  }
-
-  push(packet: T, now = this.nowMs()): void {
-    this.queue.push(packet);
-    if (!this.timerArmed) {
-      this.armNextFlush(now);
-    }
-  }
-
-  private pruneOldSends(now: number): void {
-    const cutoff = now - this.windowMs;
-    while (this.sendTimes.length > 0 && this.sendTimes[0] <= cutoff) {
-      this.sendTimes.shift();
-    }
-  }
-
-  private earliestHardAllowed(now: number): number {
-    this.pruneOldSends(now);
-    if (this.sendTimes.length < this.effectiveLimit) {
-      return now;
-    }
-    return this.sendTimes[0] + this.windowMs;
-  }
-
-  private computeDeltaStar(now: number): number {
-    this.pruneOldSends(now);
-    const used = this.sendTimes.length;
-    const free = this.effectiveLimit - used;
-    if (free <= 0) {
-      return 0;
-    }
-
-    const expiries = this.sendTimes.map((sentAt) => sentAt + this.windowMs);
-    let delta = 0;
-
-    for (let k = 1; k <= expiries.length; k++) {
-      const expiry = expiries[k - 1];
-      const horizon = Math.max(0, expiry - now - this.epsilonMs);
-      const capacity = free + (k - 1);
-      if (capacity > 0 && horizon > 0) {
-        delta = Math.max(delta, horizon / capacity);
-      }
-    }
-
-    const fullWindowHorizon = this.windowMs - this.epsilonMs;
-    delta = Math.max(delta, fullWindowHorizon / free);
-    return delta;
-  }
-
-  private armNextFlush(now: number): void {
-    if (this.queue.length === 0) {
-      return;
-    }
-
-    const hardTime = this.earliestHardAllowed(now);
-    const softTime = this.lastSend + this.computeDeltaStar(now);
-    const nextTime = Math.max(now, hardTime, softTime);
-
-    this.cancelTimer();
-    this.timerArmed = true;
-    this.scheduleTimer(nextTime, this.onTimer);
-  }
-
-  private onTimer = (): void => {
-    const now = this.nowMs();
-    this.timerArmed = false;
-
-    if (this.queue.length === 0) {
-      return;
-    }
-
-    const hardTime = this.earliestHardAllowed(now);
-    if (now < hardTime - this.epsilonMs) {
-      this.armNextFlush(now);
-      return;
-    }
-
-    const batch = this.queue.splice(0, this.queue.length);
-    this.sendEvent(batch);
-    this.lastSend = now;
-    this.sendTimes.push(now);
-
-    if (this.queue.length > 0) {
-      this.armNextFlush(this.nowMs());
-    }
-  };
+  replaceKey: string;
+  resolve?: () => void;
+  reject?: (error: Error) => void;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, timeoutError = new Error("__timeout__")): Promise<T> {
@@ -201,7 +90,9 @@ export class YeeAccessory {
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
-  private commandLimiter: WindowEnvelopeLimiter<QueuedCommandPacket>;
+  private queuedCommands: QueuedCommandPacket[] = [];
+  private commandSendTimestamps: number[] = [];
+  private commandQueueProcessing = false;
   private rateLimitTimer?: NodeJS.Timeout;
 
   private static handledAccessories = new Map<string, YeeAccessory>();
@@ -213,6 +104,8 @@ export class YeeAccessory {
   private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
   private static readonly RATE_LIMIT_LIMIT = 60;
   private static readonly RATE_LIMIT_BURST_HEADROOM = 10;
+  private static readonly RATE_LIMIT_EFFECTIVE_LIMIT =
+    YeeAccessory.RATE_LIMIT_LIMIT - YeeAccessory.RATE_LIMIT_BURST_HEADROOM;
   private floodAlarm?: number;
 
   public static instance(
@@ -276,14 +169,6 @@ export class YeeAccessory {
         ? ({ id: deviceInfo.id, ...manualConfig, ...explicitOverrideConfig } as OverrideLightConfiguration)
         : undefined;
     this.overrideConfig = overrideConfig || { id: deviceInfo.id };
-    this.commandLimiter = new WindowEnvelopeLimiter<QueuedCommandPacket>(
-      this.flushCommandBatch,
-      this.scheduleRateLimitTimer,
-      this.cancelRateLimitTimer,
-      YeeAccessory.RATE_LIMIT_WINDOW_MS,
-      YeeAccessory.RATE_LIMIT_LIMIT,
-      YeeAccessory.RATE_LIMIT_BURST_HEADROOM
-    );
     if (overrideConfig?.backgroundLight !== undefined) {
       specs.backgroundLight = overrideConfig.backgroundLight;
     }
@@ -695,10 +580,11 @@ export class YeeAccessory {
     this.heartbeatTimestamp = Date.now();
     const id = this.reserveCommandId();
     this.keepAlives.add(id);
-    this.commandLimiter.push({
+    this.enqueueCommand({
       id,
       method: "get_prop",
-      parameters: this.device.info.trackedAttributes
+      parameters: this.device.info.trackedAttributes,
+      replaceKey: "get_prop"
     });
   }
 
@@ -725,11 +611,6 @@ export class YeeAccessory {
     return duplicate;
   }
 
-  private scheduleRateLimitTimer = (absoluteTimeMs: number, callback: () => void) => {
-    const delay = Math.max(0, absoluteTimeMs - performance.now());
-    this.rateLimitTimer = setTimeout(callback, delay);
-  };
-
   private cancelRateLimitTimer = () => {
     if (!this.rateLimitTimer) {
       return;
@@ -738,15 +619,86 @@ export class YeeAccessory {
     delete this.rateLimitTimer;
   };
 
-  private flushCommandBatch = (batch: QueuedCommandPacket[]) => {
-    this.debug(
-      `rate limiter flush: sending ${batch.length} command${batch.length === 1 ? "" : "s"}`
-    );
-    for (const packet of batch) {
-      packet.onSend?.(packet.id);
-      this.sendCommandNow(packet.id, packet.method, packet.parameters);
+  private pruneCommandSendTimestamps(now: number) {
+    const cutoff = now - YeeAccessory.RATE_LIMIT_WINDOW_MS;
+    while (this.commandSendTimestamps.length > 0 && this.commandSendTimestamps[0] <= cutoff) {
+      this.commandSendTimestamps.shift();
     }
-  };
+  }
+
+  private earliestRateLimitedSend(now: number): number {
+    this.pruneCommandSendTimestamps(now);
+    if (this.commandSendTimestamps.length < YeeAccessory.RATE_LIMIT_EFFECTIVE_LIMIT) {
+      return now;
+    }
+    return this.commandSendTimestamps[0] + YeeAccessory.RATE_LIMIT_WINDOW_MS;
+  }
+
+  private armRateLimitTimer(absoluteTimeMs: number) {
+    this.cancelRateLimitTimer();
+    const delay = Math.max(0, absoluteTimeMs - Date.now());
+    this.rateLimitTimer = setTimeout(() => {
+      delete this.rateLimitTimer;
+      this.drainQueuedCommands();
+    }, delay);
+  }
+
+  private enqueueCommand(command: QueuedCommandPacket) {
+    for (let index = 0; index < this.queuedCommands.length; index++) {
+      const queued = this.queuedCommands[index];
+      if (queued.replaceKey === command.replaceKey) {
+        this.queuedCommands[index] = command;
+        queued.resolve?.();
+        this.drainQueuedCommands();
+        return;
+      }
+    }
+    this.queuedCommands.push(command);
+    this.drainQueuedCommands();
+  }
+
+  private drainQueuedCommands() {
+    if (this.commandQueueProcessing) {
+      return;
+    }
+    this.commandQueueProcessing = true;
+    try {
+      let now = Date.now();
+      while (this.queuedCommands.length > 0) {
+        const earliestSend = this.earliestRateLimitedSend(now);
+        if (now < earliestSend) {
+          this.armRateLimitTimer(earliestSend);
+          return;
+        }
+        const command = this.queuedCommands.shift();
+        if (!command) {
+          break;
+        }
+        this.sendCommandNow(command.id, command.method, command.parameters);
+        if (command.resolve && command.reject) {
+          this.debug(`sent command ${command.id}: ${command.method}`, command.parameters);
+          const timestamp = Date.now();
+          const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
+          const timeout = setTimeout(() => {
+            const pending = this.finalizeTransaction(command.id);
+            if (pending) {
+              pending.reject(new Error(`timeout waiting for response to "${command.method}"`));
+            }
+          }, timeoutMs);
+          this.transactions.set(command.id, {
+            resolve: command.resolve,
+            reject: command.reject,
+            timestamp,
+            timeout
+          });
+        }
+        this.commandSendTimestamps.push(now);
+        now = Date.now();
+      }
+    } finally {
+      this.commandQueueProcessing = false;
+    }
+  }
 
   async sendCommandPromise(method: string, parameters: Array<string | number | boolean>): Promise<void> {
     if (this.isFloodRecoveryActive()) {
@@ -759,22 +711,13 @@ export class YeeAccessory {
     }
     return new Promise((resolve, reject) => {
       const id = this.reserveCommandId();
-      this.commandLimiter.push({
+      this.enqueueCommand({
         id,
         method,
         parameters,
-        onSend: (sentId) => {
-          this.debug(`sent command ${sentId}: ${method}`, parameters);
-          const timestamp = Date.now();
-          const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
-          const timeout = setTimeout(() => {
-            const pending = this.finalizeTransaction(sentId);
-            if (pending) {
-              pending.reject(new Error(`timeout waiting for response to "${method}"`));
-            }
-          }, timeoutMs);
-          this.transactions.set(sentId, { resolve, reject, timestamp, timeout });
-        }
+        replaceKey: method,
+        resolve,
+        reject
       });
     });
   }
