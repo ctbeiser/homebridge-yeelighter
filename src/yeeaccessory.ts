@@ -81,6 +81,8 @@ export class YeeAccessory {
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
+  private commandTimestamps: number[] = [];
+  private rateLimitQueue: Promise<void> = Promise.resolve();
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
@@ -88,6 +90,13 @@ export class YeeAccessory {
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
+  private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
+  private static readonly RATE_LIMIT_TIERS: ReadonlyArray<{ threshold: number; delayMs: number }> = [
+    { threshold: 40, delayMs: 5000 },
+    { threshold: 30, delayMs: 1000 },
+    { threshold: 20, delayMs: 400 },
+    { threshold: 10, delayMs: 100 },
+  ];
   private floodAlarm?: number;
 
   public static instance(
@@ -554,6 +563,7 @@ export class YeeAccessory {
       this.debug("skipping heartbeat while recovering from quota limit");
       return;
     }
+    this.commandTimestamps.push(Date.now());
     this.debug("sending heartbeat");
     this.heartbeatTimestamp = Date.now();
     const id = this.sendCommand("get_prop", this.device.info.trackedAttributes);
@@ -583,18 +593,48 @@ export class YeeAccessory {
     return duplicate;
   }
 
+  private pruneCommandTimestamps() {
+    const cutoff = Date.now() - YeeAccessory.RATE_LIMIT_WINDOW_MS;
+    while (this.commandTimestamps.length > 0 && this.commandTimestamps[0] <= cutoff) {
+      this.commandTimestamps.shift();
+    }
+  }
+
+  private getRateLimitDelay(): number {
+    this.pruneCommandTimestamps();
+    const count = this.commandTimestamps.length;
+    for (const tier of YeeAccessory.RATE_LIMIT_TIERS) {
+      if (count >= tier.threshold) {
+        return tier.delayMs;
+      }
+    }
+    return 0;
+  }
+
+  private enqueueRateLimit(): Promise<void> {
+    const delay = this.getRateLimitDelay();
+    if (delay > 0) {
+      this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${delay}ms`);
+      this.rateLimitQueue = this.rateLimitQueue.then(
+        () => new Promise((resolve) => setTimeout(resolve, delay))
+      );
+      return this.rateLimitQueue;
+    }
+    return Promise.resolve();
+  }
+
   async sendCommandPromise(method: string, parameters: Array<string | number | boolean>): Promise<void> {
+    if (this.isFloodRecoveryActive()) {
+      this.debug(`skipping command "${method}" while recovering from quota limit`);
+      return;
+    }
+    if (this.isDuplicateCommand(method, parameters)) {
+      this.debug(`skipping duplicate command "${method}"`, parameters);
+      return;
+    }
+    await this.enqueueRateLimit();
+    this.commandTimestamps.push(Date.now());
     return new Promise((resolve, reject) => {
-      if (this.isFloodRecoveryActive()) {
-        this.debug(`skipping command "${method}" while recovering from quota limit`);
-        resolve();
-        return;
-      }
-      if (this.isDuplicateCommand(method, parameters)) {
-        this.debug(`skipping duplicate command "${method}"`, parameters);
-        resolve();
-        return;
-      }
       const timestamp = Date.now();
       const id = this.sendCommand(method, parameters);
       this.debug(`sent command ${id}: ${method}`, parameters);
