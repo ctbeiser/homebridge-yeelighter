@@ -89,7 +89,7 @@ export class YeeAccessory {
     reject: (error: Error) => void;
   }> = [];
   private draining = false;
-  private lastSendTimestamp = 0;
+
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
@@ -98,12 +98,7 @@ export class YeeAccessory {
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
   private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
-  private static readonly RATE_LIMIT_TIERS: ReadonlyArray<{ threshold: number; delayMs: number }> = [
-    { threshold: 40, delayMs: 5000 },
-    { threshold: 30, delayMs: 1000 },
-    { threshold: 20, delayMs: 400 },
-    { threshold: 10, delayMs: 100 },
-  ];
+  private static readonly RATE_LIMIT_MAX_COMMANDS = 59;
   private floodAlarm?: number;
 
   public static instance(
@@ -609,13 +604,12 @@ export class YeeAccessory {
 
   private getRateLimitDelay(): number {
     this.pruneCommandTimestamps();
-    const count = this.commandTimestamps.length;
-    for (const tier of YeeAccessory.RATE_LIMIT_TIERS) {
-      if (count >= tier.threshold) {
-        return tier.delayMs;
-      }
+    if (this.commandTimestamps.length < YeeAccessory.RATE_LIMIT_MAX_COMMANDS) {
+      return 0;
     }
-    return 0;
+    // Wait the exact time needed for the oldest command to exit the window.
+    const oldest = this.commandTimestamps[0];
+    return Math.max(0, oldest + YeeAccessory.RATE_LIMIT_WINDOW_MS - Date.now());
   }
 
   private async drainQueue(): Promise<void> {
@@ -627,20 +621,12 @@ export class YeeAccessory {
       while (this.commandQueue.length > 0) {
         const delay = this.getRateLimitDelay();
         if (delay > 0) {
-          // Subtract time already elapsed since the last send so the delay
-          // acts as a minimum spacing between commands, not a flat wait.
-          const elapsed = this.lastSendTimestamp > 0 ? Date.now() - this.lastSendTimestamp : delay;
-          const adjusted = Math.max(0, delay - elapsed);
-          if (adjusted > 0) {
-            this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${adjusted}ms`);
-            await new Promise((r) => setTimeout(r, adjusted));
-          }
+          this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
         }
         const entry = this.commandQueue.shift()!;
-        const now = Date.now();
-        this.commandTimestamps.push(now);
-        this.lastSendTimestamp = now;
-        const timestamp = now;
+        this.commandTimestamps.push(Date.now());
+        const timestamp = Date.now();
         const id = this.sendCommand(entry.method, entry.parameters);
         this.debug(`sent command ${id}: ${entry.method}`, entry.parameters);
         const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
