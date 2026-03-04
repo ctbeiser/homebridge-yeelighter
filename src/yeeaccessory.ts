@@ -90,7 +90,8 @@ export class YeeAccessory {
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
-  private queuedCommands: QueuedCommandPacket[] = [];
+  private pendingCommandOrder: string[] = [];
+  private pendingCommandsByKey = new Map<string, QueuedCommandPacket>();
   private commandSendTimestamps: number[] = [];
   private commandQueueProcessing = false;
   private rateLimitTimer?: NodeJS.Timeout;
@@ -644,16 +645,15 @@ export class YeeAccessory {
   }
 
   private enqueueCommand(command: QueuedCommandPacket) {
-    for (let index = 0; index < this.queuedCommands.length; index++) {
-      const queued = this.queuedCommands[index];
-      if (queued.replaceKey === command.replaceKey) {
-        this.queuedCommands[index] = command;
-        queued.resolve?.();
-        this.drainQueuedCommands();
-        return;
-      }
+    const queued = this.pendingCommandsByKey.get(command.replaceKey);
+    if (queued) {
+      this.pendingCommandsByKey.set(command.replaceKey, command);
+      queued.resolve?.();
+      this.drainQueuedCommands();
+      return;
     }
-    this.queuedCommands.push(command);
+    this.pendingCommandsByKey.set(command.replaceKey, command);
+    this.pendingCommandOrder.push(command.replaceKey);
     this.drainQueuedCommands();
   }
 
@@ -664,17 +664,21 @@ export class YeeAccessory {
     this.commandQueueProcessing = true;
     try {
       let now = Date.now();
-      while (this.queuedCommands.length > 0) {
+      while (this.pendingCommandOrder.length > 0) {
         const earliestSend = this.earliestRateLimitedSend(now);
         if (now < earliestSend) {
           this.armRateLimitTimer(earliestSend);
           return;
         }
-        const command = this.queuedCommands.shift();
-        if (!command) {
+        const nextKey = this.pendingCommandOrder.shift();
+        if (!nextKey) {
           break;
         }
-        this.sendCommandNow(command.id, command.method, command.parameters);
+        const command = this.pendingCommandsByKey.get(nextKey);
+        if (!command) {
+          continue;
+        }
+        this.pendingCommandsByKey.delete(nextKey);
         if (command.resolve && command.reject) {
           this.debug(`sent command ${command.id}: ${command.method}`, command.parameters);
           const timestamp = Date.now();
@@ -692,6 +696,7 @@ export class YeeAccessory {
             timeout
           });
         }
+        this.sendCommandNow(command.id, command.method, command.parameters);
         this.commandSendTimestamps.push(now);
         now = Date.now();
       }
