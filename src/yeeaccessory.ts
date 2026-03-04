@@ -89,6 +89,7 @@ export class YeeAccessory {
     reject: (error: Error) => void;
   }> = [];
   private draining = false;
+  private lastSendTimestamp = 0;
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
@@ -626,12 +627,20 @@ export class YeeAccessory {
       while (this.commandQueue.length > 0) {
         const delay = this.getRateLimitDelay();
         if (delay > 0) {
-          this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${delay}ms`);
-          await new Promise((r) => setTimeout(r, delay));
+          // Subtract time already elapsed since the last send so the delay
+          // acts as a minimum spacing between commands, not a flat wait.
+          const elapsed = this.lastSendTimestamp > 0 ? Date.now() - this.lastSendTimestamp : delay;
+          const adjusted = Math.max(0, delay - elapsed);
+          if (adjusted > 0) {
+            this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${adjusted}ms`);
+            await new Promise((r) => setTimeout(r, adjusted));
+          }
         }
         const entry = this.commandQueue.shift()!;
-        this.commandTimestamps.push(Date.now());
-        const timestamp = Date.now();
+        const now = Date.now();
+        this.commandTimestamps.push(now);
+        this.lastSendTimestamp = now;
+        const timestamp = now;
         const id = this.sendCommand(entry.method, entry.parameters);
         this.debug(`sent command ${id}: ${entry.method}`, entry.parameters);
         const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
