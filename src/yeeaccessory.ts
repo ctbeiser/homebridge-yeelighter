@@ -94,6 +94,7 @@ export class YeeAccessory {
   private lastWriteIntentTimestamp = 0;
   private lastWriteCommandTimestamp = 0;
   private lastFetchFailureTime = 0;
+  private staleUpdateIntervals = 0;
   private heartbeatTimestamp = 0;
   public overrideConfig?: OverrideLightConfiguration;
   private interval?: NodeJS.Timeout;
@@ -110,6 +111,9 @@ export class YeeAccessory {
   private static readonly ATTRIBUTE_FETCH_FAILURE_BACKOFF_MS = 5000;
   private static readonly READ_AFTER_WRITE_COOLDOWN_MS = 3000;
   private static readonly TRANSACTION_MAX_AGE_MS = 60_000;
+  private static readonly UPDATE_THRESHOLD_FACTOR = 0.85;
+  private static readonly MIN_UPDATE_THRESHOLD_MS = 10_000;
+  private static readonly MAX_STALE_INTERVALS_BEFORE_RECONNECT = 2;
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
@@ -362,8 +366,7 @@ export class YeeAccessory {
 
   private onDeviceUpdate = (update: IncomingMessage) => {
     const { id, result, error } = update;
-
-    this.updateTimestamp = Date.now();
+    const now = Date.now();
 
     if (!id) {
       // this is some strange unknown message
@@ -382,11 +385,15 @@ export class YeeAccessory {
     }
     if (result && result.length === 1 && result[0] === "ok") {
       this.connected = true;
+      this.updateTimestamp = now;
+      this.staleUpdateIntervals = 0;
       this.debug(`received ${id}: OK`);
       transaction?.resolve();
       // simple ok
     } else if (result && result.length > 3) {
       this.connected = true;
+      this.updateTimestamp = now;
+      this.staleUpdateIntervals = 0;
       if (this.lastCommandId !== id) {
         this.debug(`received out-of-order update id ${id} while last command id is ${this.lastCommandId}`);
       }
@@ -475,6 +482,7 @@ export class YeeAccessory {
 
   private onDeviceConnected = async () => {
     this.connected = true;
+    this.staleUpdateIntervals = 0;
     this.log(`${this.info.model} Connected`);
 
     try {
@@ -504,6 +512,7 @@ export class YeeAccessory {
       clearInterval(this.interval);
       delete this.interval;
     }
+    this.staleUpdateIntervals = 0;
   };
 
   private onDeviceError = (error) => {
@@ -768,12 +777,9 @@ export class YeeAccessory {
       this.debug("skipping heartbeat while recovering from quota limit");
       return;
     }
-    if (this.isWriteBurstActive()) {
-      this.debug("skipping heartbeat during write burst");
-      return;
-    }
+    const now = Date.now();
     this.debug("sending heartbeat");
-    this.heartbeatTimestamp = Date.now();
+    this.heartbeatTimestamp = now;
     void this.sendCommandPromise("get_prop", this.device.info.trackedAttributes).catch(() => {
       // keep heartbeat fire-and-forget to avoid blocking interval loop
     });
@@ -861,17 +867,36 @@ export class YeeAccessory {
         }
         // seconds since last update
         const updateSince = (Date.now() - this.updateTimestamp) / 1000;
+        const heartbeatCadenceMs = Math.max(this.platform.config.interval || 60_000, 1000);
+        const successAgeMs = this.updateTimestamp === 0 ? Number.POSITIVE_INFINITY : Date.now() - this.updateTimestamp;
+        const heartbeatNeeded = this.updateTimestamp === 0 || successAgeMs >= heartbeatCadenceMs;
+
+        if (heartbeatNeeded) {
+          this.sendHeartbeat();
+        } else {
+          this.debug(`heartbeat not needed; last success ${(successAgeMs / 1000).toFixed(2)}s ago`);
+        }
+
+        const baseThresholdMs = (this.platform.config.timeout || 5000) + heartbeatCadenceMs;
         const updateThreshold =
-          ((this.platform.config.timeout || 5000) + (this.platform.config.interval || 60_000)) / 1000;
-        if (this.updateTimestamp !== 0 && updateSince > updateThreshold) {
+          Math.max(baseThresholdMs * YeeAccessory.UPDATE_THRESHOLD_FACTOR, YeeAccessory.MIN_UPDATE_THRESHOLD_MS) / 1000;
+        const isStale = this.updateTimestamp !== 0 && updateSince > updateThreshold;
+        if (isStale) {
+          this.staleUpdateIntervals += 1;
           this.log(
-            `No update received within ${updateSince}s (Threshold: ${updateThreshold} (${this.platform.config.timeout}+${this.platform.config.interval}) => switching to unreachable`
+            `No update received within ${updateSince}s (Threshold: ${updateThreshold}, staleCount=${this.staleUpdateIntervals}/${YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT})`
+          );
+        } else {
+          this.staleUpdateIntervals = 0;
+        }
+
+        if (isStale && this.staleUpdateIntervals >= YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT) {
+          this.log(
+            `No update still stale after ${this.staleUpdateIntervals} intervals (base=${baseThresholdMs}ms, factor=${YeeAccessory.UPDATE_THRESHOLD_FACTOR}) => switching to unreachable`
           );
           this.onDeviceDisconnected();
           this.device.disconnect(false);
           this.device.reconnect();
-        } else {
-          this.sendHeartbeat();
         }
       }
       //
