@@ -338,6 +338,7 @@ export class LightService {
 
       // Acknowledge immediately so HomeKit doesn't serialize a backlog of stale
       // slider writes behind command pacing / network delays.
+      this.light.markWriteIntent();
       callback();
 
       // Collapse bursts to latest value per characteristic while a setter is in

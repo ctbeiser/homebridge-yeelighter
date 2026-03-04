@@ -91,6 +91,9 @@ export class YeeAccessory {
   private updateTimestamp: number;
   private attributes: Attributes = { ...EMPTY_ATTRIBUTES };
   private lastCommandId = 1;
+  private lastWriteIntentTimestamp = 0;
+  private lastWriteCommandTimestamp = 0;
+  private lastFetchFailureTime = 0;
   private heartbeatTimestamp = 0;
   public overrideConfig?: OverrideLightConfiguration;
   private interval?: NodeJS.Timeout;
@@ -104,6 +107,8 @@ export class YeeAccessory {
 
   private static handledAccessories = new Map<string, YeeAccessory>();
   private static readonly ATTRIBUTE_CACHE_MS = 1000;
+  private static readonly ATTRIBUTE_FETCH_FAILURE_BACKOFF_MS = 5000;
+  private static readonly READ_AFTER_WRITE_COOLDOWN_MS = 3000;
   private static readonly TRANSACTION_MAX_AGE_MS = 60_000;
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
@@ -261,7 +266,22 @@ export class YeeAccessory {
   private fetchInProgress?: Promise<Attributes>;
 
   private shouldRefreshAttributes(now = Date.now()): boolean {
+    if (this.isWriteBurstActive(now)) {
+      return false;
+    }
+    if (this.lastFetchFailureTime !== 0 && now - this.lastFetchFailureTime < YeeAccessory.ATTRIBUTE_FETCH_FAILURE_BACKOFF_MS) {
+      return false;
+    }
     return !this.lastFetchTime || now - this.lastFetchTime >= YeeAccessory.ATTRIBUTE_CACHE_MS;
+  }
+
+  private isWriteBurstActive(now = Date.now()): boolean {
+    const queuedWrites = this.commandQueue.some((item) => !item.awaitResponse);
+    if (queuedWrites) {
+      return true;
+    }
+    const latestWriteActivity = Math.max(this.lastWriteIntentTimestamp, this.lastWriteCommandTimestamp);
+    return now - latestWriteActivity < YeeAccessory.READ_AFTER_WRITE_COOLDOWN_MS;
   }
 
   private startAttributeFetch(): Promise<Attributes> {
@@ -275,12 +295,15 @@ export class YeeAccessory {
           this.platform.config.timeout || 1000
         );
         this.lastFetchTime = Date.now();
+        this.lastFetchFailureTime = 0;
         return this.attributes;
       } catch (error: unknown) {
         if (error instanceof Error && error.message === "__timeout__") {
+          this.lastFetchFailureTime = Date.now();
           this.warn("Retrieving attributes timed out. Returning cached attributes.");
           return this.attributes;
         }
+        this.lastFetchFailureTime = Date.now();
         this.warn("Retrieving attributes failed. Returning cached attributes.", error);
         return this.attributes;
       } finally {
@@ -310,6 +333,10 @@ export class YeeAccessory {
     for (const [key, value] of Object.entries(attributes)) {
       this.pendingSetValues.set(key, { value, misses: 0 });
     }
+  }
+
+  public markWriteIntent(now = Date.now()): void {
+    this.lastWriteIntentTimestamp = now;
   }
 
   private static areAttributesEqual(left: Attributes, right: Attributes): boolean {
@@ -568,6 +595,9 @@ export class YeeAccessory {
     }
     this.debug(`sendCommand(${id}, ${method})`, parameters);
     this.device.sendCommand({ id, method, params: parameters });
+    if (method !== "get_prop") {
+      this.lastWriteCommandTimestamp = Date.now();
+    }
     this.recordCommandTimestamp();
     this.lastCommandId = id;
     return id;
@@ -737,6 +767,10 @@ export class YeeAccessory {
   private sendHeartbeat() {
     if (this.isFloodRecoveryActive()) {
       this.debug("skipping heartbeat while recovering from quota limit");
+      return;
+    }
+    if (this.isWriteBurstActive()) {
+      this.debug("skipping heartbeat during write burst");
       return;
     }
     this.debug("sending heartbeat");
