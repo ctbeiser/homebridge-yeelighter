@@ -103,6 +103,7 @@ export class YeeAccessory {
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
   private static readonly COMMAND_QUOTA_WINDOW_MS = 60_000;
   private static readonly COMMAND_QUOTA_MAX_EVENTS = 60;
+  private static readonly COMMAND_QUOTA_TARGET_EVENTS = 58;
   private static readonly ADAPTIVE_PACING_START_EVENTS = 40;
   private floodAlarm?: number;
   private readonly recentCommandTimestamps: number[] = [];
@@ -593,18 +594,13 @@ export class YeeAccessory {
       return baseDebounceMs;
     }
 
-    const oldest = this.recentCommandTimestamps[0];
-    if (oldest === undefined) {
-      return baseDebounceMs;
-    }
-
-    const msUntilOldestExpires = Math.max(0, oldest + YeeAccessory.COMMAND_QUOTA_WINDOW_MS - now);
-    const headroom = YeeAccessory.COMMAND_QUOTA_MAX_EVENTS - count;
+    const msUntilHeadroom = this.getRequiredExpiryDelayMs(YeeAccessory.COMMAND_QUOTA_TARGET_EVENTS, now);
+    const headroom = YeeAccessory.COMMAND_QUOTA_TARGET_EVENTS - count;
     if (headroom <= 0) {
-      return Math.max(baseDebounceMs, msUntilOldestExpires);
+      return Math.max(baseDebounceMs, msUntilHeadroom);
     }
 
-    const pacingMs = Math.ceil(msUntilOldestExpires / headroom);
+    const pacingMs = Math.ceil(msUntilHeadroom / headroom);
     return Math.max(baseDebounceMs, pacingMs);
   }
 
@@ -619,15 +615,22 @@ export class YeeAccessory {
   }
 
   private getQuotaWindowRecoveryMs(now = Date.now()): number {
+    return this.getRequiredExpiryDelayMs(YeeAccessory.COMMAND_QUOTA_TARGET_EVENTS, now);
+  }
+
+  private getRequiredExpiryDelayMs(maxEvents: number, now = Date.now()): number {
     this.pruneRecentCommandTimestamps(now);
-    if (this.recentCommandTimestamps.length < YeeAccessory.COMMAND_QUOTA_MAX_EVENTS) {
+    const count = this.recentCommandTimestamps.length;
+    if (count < maxEvents) {
       return 0;
     }
-    const oldest = this.recentCommandTimestamps[0];
-    if (oldest === undefined) {
+    const expirationsNeeded = count - maxEvents + 1;
+    const boundaryIndex = expirationsNeeded - 1;
+    const boundaryTimestamp = this.recentCommandTimestamps[boundaryIndex];
+    if (boundaryTimestamp === undefined) {
       return 0;
     }
-    return Math.max(0, oldest + YeeAccessory.COMMAND_QUOTA_WINDOW_MS - now);
+    return Math.max(0, boundaryTimestamp + YeeAccessory.COMMAND_QUOTA_WINDOW_MS - now);
   }
 
   private scheduleCommandQueueProcessing(delayMs: number): void {
@@ -773,7 +776,7 @@ export class YeeAccessory {
           parameters,
           updatedAt: Date.now(),
           awaitResponse,
-          subscribers: awaitResponse ? [{ resolve, reject }] : []
+          subscribers: [{ resolve, reject }]
         });
       } else {
         const existing = this.commandQueue[existingIndex];
@@ -785,13 +788,10 @@ export class YeeAccessory {
           for (const subscriber of existing.subscribers) {
             subscriber.resolve();
           }
-          existing.subscribers = [];
+          existing.subscribers = [{ resolve, reject }];
         }
       }
       this.processCommandQueue();
-      if (!awaitResponse) {
-        resolve();
-      }
     });
   }
 
