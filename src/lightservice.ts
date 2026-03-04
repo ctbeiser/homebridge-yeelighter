@@ -389,7 +389,7 @@ export class LightService {
     const configuredAnimation = Number(this.platform.config?.animateChanges ?? this.platform.config?.animationTime ?? 0);
     const animationTime = Number.isFinite(configuredAnimation) ? Math.max(0, configuredAnimation) : 0;
     if (animationTime > 0) {
-      const debounceMs = Math.min(75, animationTime);
+      const debounceMs = 100;
       if (this.debounceTimers[method]) {
         clearTimeout(this.debounceTimers[method]);
       }

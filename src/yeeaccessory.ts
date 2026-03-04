@@ -45,6 +45,15 @@ interface Deferred<T> {
   timeout?: NodeJS.Timeout;
 }
 
+interface QueuedCommand {
+  method: string;
+  parameters: Array<string | number | boolean>;
+  subscribers: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }>;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, timeoutError = new Error("__timeout__")): Promise<T> {
   // create a promise that rejects in milliseconds
   const timeout = new Promise<never>((_resolve, reject) => {
@@ -78,6 +87,8 @@ export class YeeAccessory {
   private interval?: NodeJS.Timeout;
   private transactions = new Map<number, Deferred<void>>();
   private keepAlives = new Set<number>();
+  private commandQueue: QueuedCommand[] = [];
+  private commandQueueTimer?: NodeJS.Timeout;
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
@@ -88,7 +99,11 @@ export class YeeAccessory {
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
+  private static readonly COMMAND_QUOTA_WINDOW_MS = 60_000;
+  private static readonly COMMAND_QUOTA_MAX_EVENTS = 60;
+  private static readonly ADAPTIVE_PACING_START_EVENTS = 40;
   private floodAlarm?: number;
+  private readonly recentCommandTimestamps: number[] = [];
 
   public static instance(
     device: Device,
@@ -545,8 +560,137 @@ export class YeeAccessory {
     }
     this.debug(`sendCommand(${id}, ${method})`, parameters);
     this.device.sendCommand({ id, method, params: parameters });
+    this.recordCommandTimestamp();
     this.lastCommandId = id;
     return id;
+  }
+
+  private pruneRecentCommandTimestamps(now = Date.now()): void {
+    const windowStart = now - YeeAccessory.COMMAND_QUOTA_WINDOW_MS;
+    while (this.recentCommandTimestamps.length > 0 && this.recentCommandTimestamps[0] <= windowStart) {
+      this.recentCommandTimestamps.shift();
+    }
+    while (this.recentCommandTimestamps.length > YeeAccessory.COMMAND_QUOTA_MAX_EVENTS) {
+      this.recentCommandTimestamps.shift();
+    }
+  }
+
+  private recordCommandTimestamp(now = Date.now()): void {
+    this.pruneRecentCommandTimestamps(now);
+    this.recentCommandTimestamps.push(now);
+    if (this.recentCommandTimestamps.length > YeeAccessory.COMMAND_QUOTA_MAX_EVENTS) {
+      this.recentCommandTimestamps.shift();
+    }
+  }
+
+  public getAdaptiveCommandDebounceMs(baseDebounceMs = 100): number {
+    const now = Date.now();
+    this.pruneRecentCommandTimestamps(now);
+
+    const count = this.recentCommandTimestamps.length;
+    if (count < YeeAccessory.ADAPTIVE_PACING_START_EVENTS) {
+      return baseDebounceMs;
+    }
+
+    const oldest = this.recentCommandTimestamps[0];
+    if (oldest === undefined) {
+      return baseDebounceMs;
+    }
+
+    const msUntilOldestExpires = Math.max(0, oldest + YeeAccessory.COMMAND_QUOTA_WINDOW_MS - now);
+    const headroom = YeeAccessory.COMMAND_QUOTA_MAX_EVENTS - count;
+    if (headroom <= 0) {
+      return Math.max(baseDebounceMs, msUntilOldestExpires);
+    }
+
+    const pacingMs = Math.ceil(msUntilOldestExpires / headroom);
+    return Math.max(baseDebounceMs, pacingMs);
+  }
+
+  private getRequiredSendDelayMs(baseDebounceMs = 100, now = Date.now()): number {
+    this.pruneRecentCommandTimestamps(now);
+    const lastSent = this.recentCommandTimestamps.at(-1);
+    if (lastSent === undefined) {
+      return 0;
+    }
+    const spacingMs = this.getAdaptiveCommandDebounceMs(baseDebounceMs);
+    return Math.max(0, lastSent + spacingMs - now);
+  }
+
+  private scheduleCommandQueueProcessing(delayMs: number): void {
+    if (this.commandQueueTimer) {
+      return;
+    }
+    this.commandQueueTimer = setTimeout(() => {
+      this.commandQueueTimer = undefined;
+      this.processCommandQueue();
+    }, delayMs);
+  }
+
+  private resolveQueuedCommandsWithoutSending(reason: string): void {
+    if (this.commandQueue.length === 0) {
+      return;
+    }
+    if (this.commandQueueTimer) {
+      clearTimeout(this.commandQueueTimer);
+      this.commandQueueTimer = undefined;
+    }
+    this.debug(`${reason}. Dropping ${this.commandQueue.length} queued command(s).`);
+    const queued = this.commandQueue.splice(0, this.commandQueue.length);
+    for (const command of queued) {
+      for (const subscriber of command.subscribers) {
+        subscriber.resolve();
+      }
+    }
+  }
+
+  private processCommandQueue(): void {
+    if (this.commandQueue.length === 0) {
+      return;
+    }
+    if (this.isFloodRecoveryActive()) {
+      this.resolveQueuedCommandsWithoutSending("Skipping queued commands while recovering from quota limit");
+      return;
+    }
+
+    const delayMs = this.getRequiredSendDelayMs(100);
+    if (delayMs > 0) {
+      this.scheduleCommandQueueProcessing(delayMs);
+      return;
+    }
+
+    const command = this.commandQueue.shift();
+    if (!command) {
+      return;
+    }
+
+    const { method, parameters, subscribers } = command;
+    const timestamp = Date.now();
+    const id = this.sendCommand(method, parameters);
+    this.debug(`sent command ${id}: ${method}`, parameters);
+    const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
+    const timeout = setTimeout(() => {
+      const pending = this.finalizeTransaction(id);
+      if (pending) {
+        pending.reject(new Error(`timeout waiting for response to "${method}"`));
+      }
+    }, timeoutMs);
+    this.transactions.set(id, {
+      resolve: () => {
+        for (const subscriber of subscribers) {
+          subscriber.resolve();
+        }
+      },
+      reject: (error: Error) => {
+        for (const subscriber of subscribers) {
+          subscriber.reject(error);
+        }
+      },
+      timestamp,
+      timeout
+    });
+
+    this.processCommandQueue();
   }
 
   private sendHeartbeat() {
@@ -595,17 +739,19 @@ export class YeeAccessory {
         resolve();
         return;
       }
-      const timestamp = Date.now();
-      const id = this.sendCommand(method, parameters);
-      this.debug(`sent command ${id}: ${method}`, parameters);
-      const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
-      const timeout = setTimeout(() => {
-        const pending = this.finalizeTransaction(id);
-        if (pending) {
-          pending.reject(new Error(`timeout waiting for response to "${method}"`));
-        }
-      }, timeoutMs);
-      this.transactions.set(id, { resolve, reject, timestamp, timeout });
+      const existingIndex = this.commandQueue.findIndex((item) => item.method === method);
+      if (existingIndex === -1) {
+        this.commandQueue.push({
+          method,
+          parameters,
+          subscribers: [{ resolve, reject }]
+        });
+      } else {
+        const existing = this.commandQueue[existingIndex];
+        existing.parameters = parameters;
+        existing.subscribers.push({ resolve, reject });
+      }
+      this.processCommandQueue();
     });
   }
 
