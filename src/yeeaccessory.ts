@@ -81,7 +81,8 @@ export class YeeAccessory {
   private lastCommandSignature?: string;
   private lastCommandTimestamp = 0;
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
-  private commandTimestamps: number[] = [];
+  private rateLimitTokens = YeeAccessory.RATE_LIMIT_BURST;
+  private rateLimitLastRefill = 0;
   private commandQueue: Array<{
     method: string;
     parameters: Array<string | number | boolean>;
@@ -97,8 +98,8 @@ export class YeeAccessory {
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
-  private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
-  private static readonly RATE_LIMIT_MAX_COMMANDS = 59;
+  private static readonly RATE_LIMIT_INTERVAL_MS = 60_000 / 59; // ≈1017ms between commands for 59/min
+  private static readonly RATE_LIMIT_BURST = 1;
   private floodAlarm?: number;
 
   public static instance(
@@ -565,7 +566,7 @@ export class YeeAccessory {
       this.debug("skipping heartbeat while recovering from quota limit");
       return;
     }
-    this.commandTimestamps.push(Date.now());
+    this.consumeRateLimitToken();
     this.debug("sending heartbeat");
     this.heartbeatTimestamp = Date.now();
     const id = this.sendCommand("get_prop", this.device.info.trackedAttributes);
@@ -595,21 +596,29 @@ export class YeeAccessory {
     return duplicate;
   }
 
-  private pruneCommandTimestamps() {
-    const cutoff = Date.now() - YeeAccessory.RATE_LIMIT_WINDOW_MS;
-    while (this.commandTimestamps.length > 0 && this.commandTimestamps[0] <= cutoff) {
-      this.commandTimestamps.shift();
+  private refillRateLimitTokens() {
+    const now = Date.now();
+    if (this.rateLimitLastRefill > 0) {
+      const elapsed = now - this.rateLimitLastRefill;
+      this.rateLimitTokens = Math.min(
+        YeeAccessory.RATE_LIMIT_BURST,
+        this.rateLimitTokens + elapsed / YeeAccessory.RATE_LIMIT_INTERVAL_MS,
+      );
     }
+    this.rateLimitLastRefill = now;
+  }
+
+  private consumeRateLimitToken() {
+    this.refillRateLimitTokens();
+    this.rateLimitTokens -= 1;
   }
 
   private getRateLimitDelay(): number {
-    this.pruneCommandTimestamps();
-    if (this.commandTimestamps.length < YeeAccessory.RATE_LIMIT_MAX_COMMANDS) {
+    this.refillRateLimitTokens();
+    if (this.rateLimitTokens >= 1) {
       return 0;
     }
-    // Wait the exact time needed for the oldest command to exit the window.
-    const oldest = this.commandTimestamps[0];
-    return Math.max(0, oldest + YeeAccessory.RATE_LIMIT_WINDOW_MS - Date.now());
+    return Math.ceil((1 - this.rateLimitTokens) * YeeAccessory.RATE_LIMIT_INTERVAL_MS);
   }
 
   private async drainQueue(): Promise<void> {
@@ -621,11 +630,11 @@ export class YeeAccessory {
       while (this.commandQueue.length > 0) {
         const delay = this.getRateLimitDelay();
         if (delay > 0) {
-          this.debug(`rate limit: ${this.commandTimestamps.length} commands in window, waiting ${delay}ms`);
+          this.debug(`rate limit: waiting ${delay}ms (tokens: ${this.rateLimitTokens.toFixed(2)})`);
           await new Promise((r) => setTimeout(r, delay));
         }
         const entry = this.commandQueue.shift()!;
-        this.commandTimestamps.push(Date.now());
+        this.consumeRateLimitToken();
         const timestamp = Date.now();
         const id = this.sendCommand(entry.method, entry.parameters);
         this.debug(`sent command ${id}: ${entry.method}`, entry.parameters);
