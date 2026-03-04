@@ -83,12 +83,11 @@ export class YeeAccessory {
   private pendingSetValues = new Map<string, { value: unknown; misses: number }>();
   private commandTimestamps: number[] = [];
   private lastSendTimestamp = 0;
-  private commandQueue: Array<{
-    method: string;
+  private pendingCommands = new Map<string, {
     parameters: Array<string | number | boolean>;
     resolve: (value: void) => void;
     reject: (error: Error) => void;
-  }> = [];
+  }>();
   private draining = false;
 
 
@@ -647,29 +646,29 @@ export class YeeAccessory {
     }
     this.draining = true;
     try {
-      while (this.commandQueue.length > 0) {
+      while (this.pendingCommands.size > 0) {
         const delay = this.getRateLimitDelay();
         if (delay > 0) {
           this.debug(`rate limit: ${this.commandTimestamps.length} in window, waiting ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue; // re-check — entries may have been coalesced during sleep
         }
-        // Always yield — even at delay=0 — so pending HomeKit events can
-        // arrive and coalesce with queued entries before we shift.
-        await new Promise((r) => setTimeout(r, delay));
-        const entry = this.commandQueue.shift()!;
+        // Take the first (oldest) pending method.
+        const [method, entry] = this.pendingCommands.entries().next().value!;
+        this.pendingCommands.delete(method);
         const now = Date.now();
         this.commandTimestamps.push(now);
         this.lastSendTimestamp = now;
-        const timestamp = now;
-        const id = this.sendCommand(entry.method, entry.parameters);
-        this.debug(`sent command ${id}: ${entry.method}`, entry.parameters);
+        const id = this.sendCommand(method, entry.parameters);
+        this.debug(`sent command ${id}: ${method}`, entry.parameters);
         const timeoutMs = Math.max(Number(this.platform.config.timeout) || 5000, 1000);
         const timeout = setTimeout(() => {
           const pending = this.finalizeTransaction(id);
           if (pending) {
-            pending.reject(new Error(`timeout waiting for response to "${entry.method}"`));
+            pending.reject(new Error(`timeout waiting for response to "${method}"`));
           }
         }, timeoutMs);
-        this.transactions.set(id, { resolve: entry.resolve, reject: entry.reject, timestamp, timeout });
+        this.transactions.set(id, { resolve: entry.resolve, reject: entry.reject, timestamp: now, timeout });
       }
     } finally {
       this.draining = false;
@@ -686,23 +685,15 @@ export class YeeAccessory {
       return;
     }
     return new Promise((resolve, reject) => {
-      // Coalesce: find the last queued entry with the same method and
-      // replace it in place.  Replacing in place (rather than removing +
-      // appending) preserves the relative order of different methods, so
-      // e.g. a set_power("on") before set_bright is never reordered.
-      let coalesced = false;
-      for (let i = this.commandQueue.length - 1; i >= 0; i--) {
-        if (this.commandQueue[i].method === method) {
-          this.debug(`coalescing queued "${method}" command`, parameters);
-          this.commandQueue[i].resolve();
-          this.commandQueue[i] = { method, parameters, resolve, reject };
-          coalesced = true;
-          break;
-        }
+      // Map.set on an existing key updates the value but preserves
+      // insertion order, so method ordering (e.g. set_power before
+      // set_bright) is maintained while the latest parameters win.
+      const existing = this.pendingCommands.get(method);
+      if (existing) {
+        this.debug(`coalescing "${method}" command`, parameters);
+        existing.resolve();
       }
-      if (!coalesced) {
-        this.commandQueue.push({ method, parameters, resolve, reject });
-      }
+      this.pendingCommands.set(method, { parameters, resolve, reject });
       this.drainQueue();
     });
   }
