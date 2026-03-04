@@ -651,8 +651,10 @@ export class YeeAccessory {
         const delay = this.getRateLimitDelay();
         if (delay > 0) {
           this.debug(`rate limit: ${this.commandTimestamps.length} in window, waiting ${delay}ms`);
-          await new Promise((r) => setTimeout(r, delay));
         }
+        // Always yield — even at delay=0 — so pending HomeKit events can
+        // arrive and coalesce with queued entries before we shift.
+        await new Promise((r) => setTimeout(r, delay));
         const entry = this.commandQueue.shift()!;
         const now = Date.now();
         this.commandTimestamps.push(now);
@@ -684,17 +686,21 @@ export class YeeAccessory {
       return;
     }
     return new Promise((resolve, reject) => {
-      // Coalesce: only replace the last entry if it has the same method.
-      // We must not replace an earlier entry because intervening commands
-      // of a different method may depend on the original ordering
-      // (e.g. set_power("on") followed by set_bright must not have the
-      // power command coalesced to "off" while bright stays after it).
-      const last = this.commandQueue.length > 0 ? this.commandQueue[this.commandQueue.length - 1] : undefined;
-      if (last && last.method === method) {
-        this.debug(`coalescing queued "${method}" command`, parameters);
-        last.resolve();
-        this.commandQueue[this.commandQueue.length - 1] = { method, parameters, resolve, reject };
-      } else {
+      // Coalesce: find the last queued entry with the same method and
+      // replace it in place.  Replacing in place (rather than removing +
+      // appending) preserves the relative order of different methods, so
+      // e.g. a set_power("on") before set_bright is never reordered.
+      let coalesced = false;
+      for (let i = this.commandQueue.length - 1; i >= 0; i--) {
+        if (this.commandQueue[i].method === method) {
+          this.debug(`coalescing queued "${method}" command`, parameters);
+          this.commandQueue[i].resolve();
+          this.commandQueue[i] = { method, parameters, resolve, reject };
+          coalesced = true;
+          break;
+        }
+      }
+      if (!coalesced) {
         this.commandQueue.push({ method, parameters, resolve, reject });
       }
       this.drainQueue();
