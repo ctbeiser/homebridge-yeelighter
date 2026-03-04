@@ -36,7 +36,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
 
   private async sendPower(mode?: number) {
     if (mode === undefined) {
-      await this.sendCoalescedPowerCommand("set_power", ["off", "smooth", 500]);
+      await this.sendCoalescedPowerCommand("set_power", ["off", "smooth", 200]);
     } else {
       if (this.pendingCt !== undefined) {
         const ct = this.pendingCt;

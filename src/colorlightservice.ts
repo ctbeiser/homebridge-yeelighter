@@ -24,7 +24,7 @@ export class ColorLightService extends LightService implements ConcreteLightServ
       async () => this.getAttribute("power"),
       async (value) => {
         this.cancelAllDebounces();
-        await this.sendCoalescedPowerCommand("set_power", [value ? "on" : "off", "smooth", 500, 0]);
+        await this.sendCoalescedPowerCommand("set_power", [value ? "on" : "off", "smooth", 200, 0]);
         this.setAttributes({ power: value });
       }
     );
