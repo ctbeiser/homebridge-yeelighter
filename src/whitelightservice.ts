@@ -22,7 +22,7 @@ export class WhiteLightService extends LightService implements ConcreteLightServ
       },
       async (value) => {
         this.cancelAllDebounces();
-        await this.sendCommand("set_power", [value ? "on" : "off", "smooth", 500, 0]);
+        await this.sendCoalescedPowerCommand("set_power", [value ? "on" : "off", "smooth", 500, 0]);
         this.setAttributes({ power: value });
       }
     );
@@ -40,7 +40,7 @@ export class WhiteLightService extends LightService implements ConcreteLightServ
           this.saveDefaultIfNeeded();
         } else {
           this.cancelAllDebounces();
-          await this.sendSuddenCommand("set_power", "off");
+          await this.sendCoalescedPowerCommand("set_power", ["off", "sudden", 0]);
           this.setAttributes({ power: false, bright: 0 });
         }
       }

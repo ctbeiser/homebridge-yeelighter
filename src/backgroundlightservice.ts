@@ -39,7 +39,7 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
           // And to get the colors we wanted, not the one from the scene, we send set_hsv command
           await this.setHSV("bg_");
         } else {
-          await this.sendCommandPromiseWithErrorHandling("bg_set_power", [
+          await this.sendCoalescedPowerCommand("bg_set_power", [
             value ? "on" : "off",
             "smooth",
             500,
@@ -62,7 +62,7 @@ export class BackgroundLightService extends LightService implements ConcreteLigh
           this.log(`set brightness to 0, power off`);
           this.cancelAllDebounces();
           this.updateCharacteristic(this.platform.Characteristic.Brightness, 0);
-          await this.sendSuddenCommand("bg_set_power", "off");
+          await this.sendCoalescedPowerCommand("bg_set_power", ["off", "sudden", 0]);
         }
         this.saveDefaultIfNeeded();
       }

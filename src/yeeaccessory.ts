@@ -92,9 +92,9 @@ export class YeeAccessory {
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
   private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
   private static readonly RATE_LIMIT_TIERS: ReadonlyArray<{ threshold: number; delayMs: number }> = [
-    { threshold: 40, delayMs: 5000 },
-    { threshold: 30, delayMs: 1000 },
-    { threshold: 20, delayMs: 400 },
+    { threshold: 50, delayMs: 5000 },
+    { threshold: 40, delayMs: 1000 },
+    { threshold: 30, delayMs: 400 },
     { threshold: 10, delayMs: 100 },
   ];
   private floodAlarm?: number;

@@ -36,7 +36,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
 
   private async sendPower(mode?: number) {
     if (mode === undefined) {
-      await this.sendCommand("set_power", ["off", "smooth", 500]);
+      await this.sendCoalescedPowerCommand("set_power", ["off", "smooth", 500]);
     } else {
       if (this.pendingCt !== undefined) {
         const ct = this.pendingCt;
@@ -44,7 +44,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
         await this.sendAnimatedCommand("set_ct_abx", ct);
         this.setAttributes({ ct });
       }
-      await this.sendCommand("set_power", ["on", "sudden", 0, mode]);
+      await this.sendCoalescedPowerCommand("set_power", ["on", "sudden", 0, mode]);
       this.powerMode = mode;
     }
   }
@@ -87,11 +87,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
 
           let valueToSet = value;
           if (this.specs.nightLight) {
-            if (value < 50) {
-              valueToSet = value * 2 - 1;
-            } else {
-              valueToSet = Math.max(1, (value - 50) * 2);
-            }
+            valueToSet = value < 50 ? value * 2 - 1 : Math.max(1, (value - 50) * 2);
           }
           this.log(`set brightness ${value} (translated to ${valueToSet})`);
           await this.sendAnimatedCommand("set_bright", valueToSet);

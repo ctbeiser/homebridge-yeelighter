@@ -145,6 +145,14 @@ export interface LightServiceParameters {
   light: YeeAccessory;
 }
 
+type CoalescedCommandType = "power" | "brightness";
+
+interface CoalescedCommand {
+  method: string;
+  parameters: Array<string | number | boolean>;
+  deferreds: Array<{ resolve: () => void; reject: (error: Error) => void }>;
+}
+
 /**
  * Base class for services representing a light. This is a mixin class that is
  * used by the concrete light services.
@@ -159,6 +167,11 @@ export class LightService {
   protected light: YeeAccessory;
   protected name: string;
   private debounceTimers: Record<string, NodeJS.Timeout> = {};
+  private readonly coalescedCommands: Record<CoalescedCommandType, { processing: boolean; pending?: CoalescedCommand }> =
+    {
+      power: { processing: false },
+      brightness: { processing: false }
+    };
   private activeCharacteristicGets = 0;
 
   constructor(
@@ -376,6 +389,58 @@ export class LightService {
     return this.sendCommandPromiseWithErrorHandling(method, parameters);
   }
 
+  private isBrightnessMethod(method: string): boolean {
+    return method === "set_bright" || method === "bg_set_bright";
+  }
+
+  private async processCoalescedCommands(type: CoalescedCommandType): Promise<void> {
+    const queue = this.coalescedCommands[type];
+    while (queue.pending) {
+      const command = queue.pending;
+      queue.pending = undefined;
+      await this.sendCommandPromiseWithErrorHandling(command.method, command.parameters);
+      for (const deferred of command.deferreds) {
+        deferred.resolve();
+      }
+    }
+    queue.processing = false;
+  }
+
+  private enqueueCoalescedCommand(
+    type: CoalescedCommandType,
+    method: string,
+    parameters: Array<string | number | boolean>
+  ): Promise<void> {
+    const queue = this.coalescedCommands[type];
+    return new Promise((resolve, reject) => {
+      const nextCommand: CoalescedCommand = { method, parameters, deferreds: [{ resolve, reject }] };
+      if (queue.pending) {
+        for (const deferred of queue.pending.deferreds) {
+          deferred.resolve();
+        }
+      }
+      queue.pending = nextCommand;
+      if (!queue.processing) {
+        queue.processing = true;
+        void this.processCoalescedCommands(type);
+      }
+    });
+  }
+
+  protected async sendCoalescedPowerCommand(
+    method: string,
+    parameters: Array<string | number | boolean>
+  ): Promise<void> {
+    return this.enqueueCoalescedCommand("power", method, parameters);
+  }
+
+  protected async sendCoalescedBrightnessCommand(
+    method: string,
+    parameters: Array<string | number | boolean>
+  ): Promise<void> {
+    return this.enqueueCoalescedCommand("brightness", method, parameters);
+  }
+
   protected async sendSuddenCommand(method: string, parameter: string | number | boolean) {
     return this.sendCommandPromiseWithErrorHandling(method, [parameter, "sudden", 0]);
   }
@@ -394,12 +459,19 @@ export class LightService {
         clearTimeout(this.debounceTimers[method]);
       }
       this.debounceTimers[method] = setTimeout(async () => {
-        await this.sendCommandPromiseWithErrorHandling(method, [...messageParameters, "smooth", animationTime]);
+        const commandParameters = [...messageParameters, "smooth", animationTime];
+        await (this.isBrightnessMethod(method)
+          ? this.sendCoalescedBrightnessCommand(method, commandParameters)
+          : this.sendCommandPromiseWithErrorHandling(method, commandParameters));
         delete this.debounceTimers[method];
       }, debounceMs);
       return;
     } else {
-      return this.sendCommandPromiseWithErrorHandling(method, [...messageParameters, "sudden", 0]);
+      const commandParameters = [...messageParameters, "sudden", 0];
+      if (this.isBrightnessMethod(method)) {
+        return this.sendCoalescedBrightnessCommand(method, commandParameters);
+      }
+      return this.sendCommandPromiseWithErrorHandling(method, commandParameters);
     }
   }
 
@@ -411,7 +483,7 @@ export class LightService {
 
   protected async ensurePowerMode(mode: number, prefix = "") {
     if (this.powerMode !== mode) {
-      await this.sendCommand(`${prefix}set_power`, ["on", "sudden", 0, mode]);
+      await this.sendCoalescedPowerCommand(`${prefix}set_power`, ["on", "sudden", 0, mode]);
       this.powerMode = mode;
       if (prefix == "bg_") {
         this.setAttributes({ bg_power: true });
