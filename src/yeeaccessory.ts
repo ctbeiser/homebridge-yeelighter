@@ -111,9 +111,11 @@ export class YeeAccessory {
   private static readonly ATTRIBUTE_FETCH_FAILURE_BACKOFF_MS = 5000;
   private static readonly READ_AFTER_WRITE_COOLDOWN_MS = 3000;
   private static readonly TRANSACTION_MAX_AGE_MS = 60_000;
-  private static readonly UPDATE_THRESHOLD_FACTOR = 0.85;
-  private static readonly MIN_UPDATE_THRESHOLD_MS = 10_000;
-  private static readonly MAX_STALE_INTERVALS_BEFORE_RECONNECT = 2;
+  private static readonly UPDATE_WARNING_THRESHOLD_FACTOR = 1.2;
+  private static readonly UPDATE_DISCONNECT_THRESHOLD_FACTOR = 1.6;
+  private static readonly MIN_UPDATE_WARNING_THRESHOLD_MS = 15_000;
+  private static readonly MIN_UPDATE_DISCONNECT_THRESHOLD_MS = 20_000;
+  private static readonly MAX_STALE_INTERVALS_BEFORE_RECONNECT = 3;
   private static readonly COMMAND_ID_MAX = Number.MAX_SAFE_INTEGER - 1;
   private static readonly DUPLICATE_COMMAND_WINDOW_MS = 500;
   private static readonly DEFAULT_FLOOD_RECOVERY_MS = 1500;
@@ -878,21 +880,39 @@ export class YeeAccessory {
         }
 
         const baseThresholdMs = (this.platform.config.timeout || 5000) + heartbeatCadenceMs;
-        const updateThreshold =
-          Math.max(baseThresholdMs * YeeAccessory.UPDATE_THRESHOLD_FACTOR, YeeAccessory.MIN_UPDATE_THRESHOLD_MS) / 1000;
-        const isStale = this.updateTimestamp !== 0 && updateSince > updateThreshold;
-        if (isStale) {
-          this.staleUpdateIntervals += 1;
-          this.log(
-            `No update received within ${updateSince}s (Threshold: ${updateThreshold}, staleCount=${this.staleUpdateIntervals}/${YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT})`
+        const warningThreshold =
+          Math.max(
+            baseThresholdMs * YeeAccessory.UPDATE_WARNING_THRESHOLD_FACTOR,
+            YeeAccessory.MIN_UPDATE_WARNING_THRESHOLD_MS
+          ) / 1000;
+        const disconnectThreshold =
+          Math.max(
+            baseThresholdMs * YeeAccessory.UPDATE_DISCONNECT_THRESHOLD_FACTOR,
+            YeeAccessory.MIN_UPDATE_DISCONNECT_THRESHOLD_MS
+          ) / 1000;
+        const isWarningStale = this.updateTimestamp !== 0 && updateSince > warningThreshold;
+        const isDisconnectStale = this.updateTimestamp !== 0 && updateSince > disconnectThreshold;
+
+        if (isWarningStale) {
+          this.debug(
+            `No update received within ${updateSince}s (warnThreshold=${warningThreshold}, disconnectThreshold=${disconnectThreshold})`
           );
+        }
+
+        if (isDisconnectStale) {
+          this.staleUpdateIntervals += 1;
+          if (this.staleUpdateIntervals < YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT) {
+            this.debug(
+              `No update received within ${updateSince}s (disconnectThreshold=${disconnectThreshold}, staleCount=${this.staleUpdateIntervals}/${YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT})`
+            );
+          }
         } else {
           this.staleUpdateIntervals = 0;
         }
 
-        if (isStale && this.staleUpdateIntervals >= YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT) {
+        if (isDisconnectStale && this.staleUpdateIntervals >= YeeAccessory.MAX_STALE_INTERVALS_BEFORE_RECONNECT) {
           this.log(
-            `No update still stale after ${this.staleUpdateIntervals} intervals (base=${baseThresholdMs}ms, factor=${YeeAccessory.UPDATE_THRESHOLD_FACTOR}) => switching to unreachable`
+            `No update still stale after ${this.staleUpdateIntervals} intervals (base=${baseThresholdMs}ms, disconnectFactor=${YeeAccessory.UPDATE_DISCONNECT_THRESHOLD_FACTOR}) => switching to unreachable`
           );
           this.onDeviceDisconnected();
           this.device.disconnect(false);
