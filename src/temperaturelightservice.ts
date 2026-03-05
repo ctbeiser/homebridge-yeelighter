@@ -79,7 +79,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
       },
       async (value) => {
         if (value > 0) {
-          const attributes = this.light.getAttributesFast();
+          const attributes = await this.light.getAttributes();
           const desiredMode = this.specs.nightLight && false && value < 50 ? POWERMODE_MOON : POWERMODE_CT;
 
           if (!attributes.power || (this.specs.nightLight && false && this.powerMode !== desiredMode)) {
@@ -114,7 +114,7 @@ export class TemperatureLightService extends LightService implements ConcreteLig
       },
       async (value) => {
         const kelvin = convertColorTemperature(value);
-        const attributes = this.light.getAttributesFast();
+        const attributes = await this.light.getAttributes();
         if (!attributes.power) {
           this.pendingCt = kelvin;
           this.setAttributes({ ct: kelvin });
